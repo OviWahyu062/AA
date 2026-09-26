@@ -96,7 +96,7 @@ import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import fitz
 import qrcode
-from streamlit_cookies_manager import EncryptedCookieManager
+import extra_streamlit_components as stx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -5264,19 +5264,10 @@ st.set_page_config(
 
 
 # Persistent login cookie to prevent logout when browser reruns due to resize/device changes
-try:
-    _COOKIE_SECRET = st.secrets.get("cookie_secret", "PT_BIMA_MASTER_MATERIAL_SECURE_KEY_CHANGE_ME")
-except Exception:
-    _COOKIE_SECRET = "PT_BIMA_MASTER_MATERIAL_SECURE_KEY_CHANGE_ME"
+# Using extra_streamlit_components because streamlit_cookies_manager is not compatible
+# with Streamlit >= 1.45 (it still uses deprecated st.cache).
 
-cookies = EncryptedCookieManager(
-    prefix="pt_bima_master/",
-    password=_COOKIE_SECRET,
-)
-
-if not cookies.ready():
-    st.stop()
-
+cookie_manager = stx.CookieManager()
 
 def _save_login_cookie() -> None:
     payload = {
@@ -5291,12 +5282,14 @@ def _save_login_cookie() -> None:
         "no_hp": st.session_state.get("no_hp", ""),
         "nomor_pegawai": st.session_state.get("nomor_pegawai", ""),
     }
-    cookies["session_user"] = json.dumps(payload)
-    cookies.save()
-
+    cookie_manager.set(
+        "pt_bima_session",
+        json.dumps(payload),
+        expires_at=datetime.now() + timedelta(days=7),
+    )
 
 def _restore_login_cookie() -> None:
-    raw = cookies.get("session_user")
+    raw = cookie_manager.get("pt_bima_session")
     if not raw:
         return
     try:
@@ -5306,13 +5299,10 @@ def _restore_login_cookie() -> None:
         st.session_state["authenticated"] = True
         st.session_state["logged_in"] = True
     except Exception:
-        cookies["session_user"] = ""
-        cookies.save()
-
+        cookie_manager.delete("pt_bima_session")
 
 def _clear_login_cookie() -> None:
-    cookies["session_user"] = ""
-    cookies.save()
+    cookie_manager.delete("pt_bima_session")
 
 
 def _init_session() -> None:
