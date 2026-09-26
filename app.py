@@ -96,6 +96,7 @@ import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import fitz
 import qrcode
+from streamlit_cookies_manager import EncryptedCookieManager
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -3431,6 +3432,12 @@ def render_sidebar(user: dict, current_page: str) -> str:
         for page in menu_for_role(str(user.get("role", ""))):
             if _nav_button(PAGE_LABELS[page], PAGE_ICONS[page], f"nav_{page}", page == current_page):
                 new_page = page
+
+        theme_label = "☀️ Mode Terang" if st.session_state.get("theme_mode") == "dark" else "🌙 Mode Gelap"
+        if st.button(theme_label, key="toggle_theme", use_container_width=True):
+            st.session_state["theme_mode"] = "light" if st.session_state.get("theme_mode") == "dark" else "dark"
+            st.rerun()
+
         st.markdown(
             '''<div class="bima-sidebar-bottom-brand">
                  <strong>SINERGI<br>UNTUK LAUTAN<br>INDONESIA</strong>
@@ -5256,6 +5263,58 @@ st.set_page_config(
 )
 
 
+# Persistent login cookie to prevent logout when browser reruns due to resize/device changes
+try:
+    _COOKIE_SECRET = st.secrets.get("cookie_secret", "PT_BIMA_MASTER_MATERIAL_SECURE_KEY_CHANGE_ME")
+except Exception:
+    _COOKIE_SECRET = "PT_BIMA_MASTER_MATERIAL_SECURE_KEY_CHANGE_ME"
+
+cookies = EncryptedCookieManager(
+    prefix="pt_bima_master/",
+    password=_COOKIE_SECRET,
+)
+
+if not cookies.ready():
+    st.stop()
+
+
+def _save_login_cookie() -> None:
+    payload = {
+        "authenticated": True,
+        "username": st.session_state.get("username", ""),
+        "nama": st.session_state.get("nama", ""),
+        "role": st.session_state.get("role", ""),
+        "jabatan": st.session_state.get("jabatan", ""),
+        "area": st.session_state.get("area", ""),
+        "site": st.session_state.get("site", ""),
+        "email": st.session_state.get("email", ""),
+        "no_hp": st.session_state.get("no_hp", ""),
+        "nomor_pegawai": st.session_state.get("nomor_pegawai", ""),
+    }
+    cookies["session_user"] = json.dumps(payload)
+    cookies.save()
+
+
+def _restore_login_cookie() -> None:
+    raw = cookies.get("session_user")
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+        for k, v in data.items():
+            st.session_state[k] = v
+        st.session_state["authenticated"] = True
+        st.session_state["logged_in"] = True
+    except Exception:
+        cookies["session_user"] = ""
+        cookies.save()
+
+
+def _clear_login_cookie() -> None:
+    cookies["session_user"] = ""
+    cookies.save()
+
+
 def _init_session() -> None:
     defaults = {
         "authenticated": False,
@@ -5270,6 +5329,7 @@ def _init_session() -> None:
         "no_hp": "",
         "nomor_pegawai": "",
         "current_page": PAGE_DASHBOARD,
+        "theme_mode": "light",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -5512,10 +5572,32 @@ def _inject_logged_in_css() -> None:
             .bima-sidebar-bottom-brand {{ display:none !important; }}
           }}
           @media (max-height:720px) {{ .bima-sidebar-bottom-brand {{ display:none !important; }} }}
+
+          body[data-theme="dark"], body[data-theme="dark"] * {{ }}
+          .dark-mode-shell {{ }}
         </style>
         ''',
         unsafe_allow_html=True,
     )
+
+def _inject_theme_css() -> None:
+    mode = st.session_state.get("theme_mode", "light")
+    if mode == "dark":
+        st.markdown("""
+        <style>
+        [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e5e7eb !important; }
+        [data-testid="stSidebar"] > div:first-child { background:#111827 !important; }
+        [data-testid="stSidebar"] button { color:#e5e7eb !important; }
+        .bima-page-head h1, .bima-page-head p, .bima-page-period .value, .bima-page-period .label { color:#e5e7eb !important; }
+        div[data-testid="stVerticalBlockBorderWrapper"], .bima-metric-card { background:#1e293b !important; border-color:#334155 !important; color:#e5e7eb !important; }
+        .bima-table-head { background:#334155 !important; color:#f8fafc !important; }
+        .bima-table-cell { color:#e5e7eb !important; }
+        [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-testid="stSelectbox"] div { background:#111827 !important; color:#f8fafc !important; }
+        [data-testid="stForm"] { background:#1e293b !important; border-color:#334155 !important; }
+        .bima-user-meta strong { color:#f8fafc !important; }
+        </style>
+        """, unsafe_allow_html=True)
+
 
 def _render_login() -> None:
     bg = image_to_data_uri(LOGIN_BG)
@@ -5609,6 +5691,7 @@ def _current_user() -> dict:
 
 
 def _logout(user: dict) -> None:
+    _clear_login_cookie()
     log_event(str(user.get("username", "")), str(user.get("role", "")), "LOGOUT", "", "Logout dari sistem.")
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -5617,6 +5700,7 @@ def _logout(user: dict) -> None:
 
 def _render_app() -> None:
     _inject_logged_in_css()
+    _inject_theme_css()
     user = _current_user()
     request_service = RequestService()
     approval_service = ApprovalService(request_service)
@@ -5713,6 +5797,7 @@ def _render_app() -> None:
 
 
 _init_session()
+_restore_login_cookie()
 _inject_base_css()
 _verify_request = _query_param_value("verify")
 _verify_version = _query_param_value("v")
