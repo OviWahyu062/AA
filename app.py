@@ -3647,23 +3647,20 @@ def render_header(user: dict, notification_count: int = 0) -> bool:
     pelindo = image_to_data_uri(PELINDO_BIMA_LOGO)
     danantara = image_to_data_uri(DANANTARA_LOGO)
     with st.container(border=False):
-        st.markdown('<span class="bima-header-marker"></span>', unsafe_allow_html=True)
-        title_col, brands_col = st.columns([1.15, 1], gap="small", vertical_alignment="center")
-        with title_col:
-            st.markdown(
-                '<div class="enterprise-header-brand">'
-                '<strong>MASTER MATERIAL</strong>'
-                '<span>Sistem Pengajuan dan Persetujuan SAP</span>'
-                '</div>', unsafe_allow_html=True,
-            )
-        with brands_col:
-            st.markdown(
-                f'<div class="enterprise-company-logos" aria-label="Identitas perusahaan">'
-                f'<img class="enterprise-pelindo-logo" src="{pelindo}" alt="Pelindo Jasa Maritim BIMA">'
-                f'<span class="enterprise-logo-separator" aria-hidden="true"></span>'
-                f'<img class="enterprise-danantara-logo" src="{danantara}" alt="Danantara Indonesia">'
-                f'</div>', unsafe_allow_html=True,
-            )
+        st.markdown(
+            '<span class="bima-header-marker"></span>'
+            '<div class="enterprise-responsive-header">'
+            '<div class="enterprise-header-brand">'
+            '<strong>MASTER MATERIAL</strong>'
+            '<span>Sistem Pengajuan dan Persetujuan SAP</span>'
+            '</div>'
+            '<div class="enterprise-company-logos" aria-label="Identitas perusahaan">'
+            f'<img class="enterprise-pelindo-logo" src="{pelindo}" alt="Pelindo Jasa Maritim BIMA">'
+            '<span class="enterprise-logo-separator" aria-hidden="true"></span>'
+            f'<img class="enterprise-danantara-logo" src="{danantara}" alt="Danantara Indonesia">'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
     return False
 
 
@@ -3734,6 +3731,39 @@ def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -
             '</div>', unsafe_allow_html=True,
         )
         return new_page
+
+
+def render_mobile_navigation(user: dict, current_page: str) -> None:
+    """Secondary, touch-friendly page selector for narrow viewports.
+
+    It is rendered on the server for every width, but CSS shows it only on
+    phones/tablets. Authorization still uses page_allowed and menu_for_role.
+    """
+    allowed_pages = menu_for_role(str(user.get('role', '')))
+    if not allowed_pages:
+        return
+    active = current_page if current_page in allowed_pages else allowed_pages[0]
+    if st.session_state.get('mobile_nav_synced_page') != active:
+        st.session_state['mobile_nav_choice'] = active
+        st.session_state['mobile_nav_synced_page'] = active
+    with st.container(key='bima_mobile_menu'):
+        st.markdown(
+            '<div class="bima-mobile-navigation-heading">'
+            '<span>MENU HALAMAN</span><small>Pilih halaman yang ingin dibuka</small>'
+            '</div>', unsafe_allow_html=True,
+        )
+        chosen = st.selectbox(
+            'Navigasi halaman',
+            options=allowed_pages,
+            format_func=lambda page: PAGE_LABELS.get(page, str(page)),
+            key='mobile_nav_choice',
+            label_visibility='collapsed',
+        )
+        if chosen != active:
+            if page_allowed(str(user.get('role', '')), chosen):
+                st.session_state['current_page'] = chosen
+                st.session_state['mobile_nav_synced_page'] = chosen
+                st.rerun()
 
 
 # ============================== user_experience/helpers.py ==============================
@@ -4723,7 +4753,9 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
         _panel_head(2, "Daftar Item Material dalam 1 Request", "Tambahkan beberapa item barang dalam satu nomor ID Request yang sama")
         if "request_item_count" not in st.session_state:
             st.session_state["request_item_count"] = 1
-        _, b2, b1 = st.columns([5.3, 1.45, 1.55], gap="small")
+        spacer, b2, b1 = st.columns([5.3, 1.45, 1.55], gap="small")
+        with spacer:
+            st.markdown('<span class="bima-responsive-empty-spacer"></span>', unsafe_allow_html=True)
         with b2:
             if st.session_state["request_item_count"] > 1 and st.button(
                 "Hapus Item Terakhir",
@@ -4882,7 +4914,9 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
         if "is_submitting_request" not in st.session_state:
             st.session_state["is_submitting_request"] = False
         st.markdown('<div class="bima-form-action-divider"></div>', unsafe_allow_html=True)
-        _, reset_col, submit_col = st.columns([5, 1.25, 2.3], gap="small")
+        spacer, reset_col, submit_col = st.columns([5, 1.25, 2.3], gap="small")
+        with spacer:
+            st.markdown('<span class="bima-responsive-empty-spacer"></span>', unsafe_allow_html=True)
         with reset_col:
             if st.button("Reset Form", key="reset_request_form", use_container_width=True, disabled=st.session_state["is_submitting_request"]):
                 st.session_state["request_reset_pending"] = True
@@ -4920,7 +4954,9 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
         section_heading("Daftar Permohonan Master Material", "Seluruh histori pengajuan data master material")
         requests = request_service.get_scoped_headers(user)
         filtered = _request_filters(requests)
-        _, ex2 = st.columns([5.7, 1], gap="small")
+        spacer, ex2 = st.columns([5.7, 1], gap="small")
+        with spacer:
+            st.markdown('<span class="bima-responsive-empty-spacer"></span>', unsafe_allow_html=True)
         with ex2:
             st.download_button("Export CSV", data=dataframe_to_csv_bytes(filtered), file_name="daftar_permohonan_material.csv", mime="text/csv", use_container_width=True)
         selected = render_request_table(filtered, "request_form_table")
@@ -5459,6 +5495,7 @@ def render_documents_page(user: dict, request_service: RequestService, approval_
     left, center, right = st.columns([2.25, 5.3, 2.15], gap="medium")
 
     with left:
+        st.markdown('<span class="bima-responsive-document-layout"></span>', unsafe_allow_html=True)
         with st.container(border=True):
             st.markdown('<span class="bima-document-list-marker"></span>', unsafe_allow_html=True)
             search = st.text_input("Cari dokumen", key="document_search", placeholder="Nomor request / nama material")
@@ -5692,7 +5729,8 @@ st.set_page_config(
     page_title="Sistem Master Material | PT BIMA",
     page_icon=str(PELINDO_BIMA_LOGO),
     layout="wide",
-    initial_sidebar_state="expanded",
+    # Streamlit chooses overlay sidebar on mobile and a persistent panel on desktop.
+    initial_sidebar_state="auto",
 )
 
 
@@ -6478,6 +6516,238 @@ def _inject_enterprise_css() -> None:
         </style>""", unsafe_allow_html=True)
 
 
+def _inject_responsive_css() -> None:
+    """Last presentation layer: prevents overlap on phones and small laptops."""
+    st.markdown('<style>' + _RESPONSIVE_CSS + '</style>', unsafe_allow_html=True)
+
+
+_RESPONSIVE_CSS = r"""
+/* MASTER MATERIAL - RESPONSIVE UI: desktop, tablet, phone (2026-10) */
+html, body { max-width:100%; overflow-x:clip; }
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"], [data-testid="stMainBlockContainer"] { min-width:0 !important; max-width:100%; }
+div[data-testid="stHorizontalBlock"],
+div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] { min-width:0 !important; }
+.bima-readonly-table-wrap { max-width:100%; overflow-x:auto !important; -webkit-overflow-scrolling:touch; }
+.bima-readonly-table { min-width:620px; }
+.profile-kv .v, .document-info-list strong, .ux-item-title,
+.ux-list-id, .ux-stage-name, .bima-card-subtitle { overflow-wrap:anywhere; word-break:normal; }
+.enterprise-responsive-header { width:100%; min-width:0; display:flex; align-items:center;
+ justify-content:space-between; gap:20px; }
+.enterprise-responsive-header .enterprise-header-brand { min-width:0; flex:1 1 auto; }
+.enterprise-responsive-header .enterprise-company-logos { flex:0 1 415px; max-width:100%; min-width:0; }
+.st-key-bima_mobile_menu { display:none !important; }
+.bima-mobile-navigation-heading { display:flex; justify-content:space-between; align-items:center;
+ gap:8px; margin-bottom:8px; }
+.bima-mobile-navigation-heading span { font-size:11px; color:#245389; letter-spacing:.08em; font-weight:760; }
+.bima-mobile-navigation-heading small { font-size:11px; color:#7890ae; }
+
+/* Small desktop / tablet: never squeeze 4 columns into unreadable slivers. */
+@media (max-width:1180px) {
+  div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(4)) {
+    flex-wrap:wrap !important; align-content:stretch !important;
+  }
+  div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(4))
+    > div[data-testid="stColumn"] {
+    flex:1 1 calc(50% - 12px) !important;
+    width:calc(50% - 12px) !important;
+    max-width:100% !important; min-width:0 !important;
+  }
+  div[data-testid="stHorizontalBlock"]:has(.bima-responsive-document-layout),
+  div[data-testid="stHorizontalBlock"]:has(.bima-detail-panel-marker):has(.bima-approval-panel-marker) {
+    flex-wrap:wrap !important;
+  }
+  div[data-testid="stHorizontalBlock"]:has(.bima-responsive-document-layout) > div[data-testid="stColumn"],
+  div[data-testid="stHorizontalBlock"]:has(.bima-detail-panel-marker):has(.bima-approval-panel-marker)
+    > div[data-testid="stColumn"] {
+    flex:1 1 100% !important; width:100% !important; min-width:0 !important;
+  }
+  .bima-metric-card { min-height:125px !important; }
+  .ux-overview-track { grid-template-columns:repeat(3,minmax(0,1fr)) !important; }
+  .ux-overview-step::after { display:none !important; }
+  .enterprise-responsive-header .enterprise-company-logos { gap:10px !important; }
+}
+
+/* Between laptop and tablet the brand stays horizontally balanced. */
+@media (min-width:821px) and (max-width:1180px) {
+  section[data-testid="stSidebar"] {width:220px !important; min-width:220px !important;}
+  .enterprise-pelindo-logo { width:clamp(140px,17vw,188px) !important; max-width:66% !important; }
+  .enterprise-danantara-logo { width:clamp(105px,12vw,142px) !important; max-width:34% !important; }
+  .enterprise-company-logos { gap:11px !important; }
+}
+
+/* Phone / compact tablet: use a mobile navigation drawer and single-column content. */
+@media (max-width:820px) {
+  [data-testid="stAppViewContainer"] {
+    background-position:center top !important;
+    background-size:100% 260px,auto 260px !important;
+  }
+  [data-testid="stMainBlockContainer"] {
+    width:100% !important; max-width:100% !important;
+    padding:0 14px max(30px,env(safe-area-inset-bottom)) !important;
+  }
+  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
+    position:relative !important; top:auto !important;
+    margin:0 -14px 12px !important; padding:14px 14px 13px !important;
+    min-height:unset !important;
+    background:rgba(251,253,255,.91) !important;
+    backdrop-filter:blur(8px);
+  }
+  .enterprise-responsive-header {flex-direction:column !important; align-items:stretch !important; gap:12px !important;}
+  .enterprise-responsive-header .enterprise-header-brand { padding-left:42px !important; flex:none; }
+  .enterprise-header-brand strong {font-size:clamp(14px,4.4vw,18px) !important; line-height:1.25 !important; }
+  .enterprise-header-brand span {font-size:clamp(10px,2.8vw,12px) !important; line-height:1.4 !important; display:block !important;}
+  .enterprise-responsive-header .enterprise-company-logos {
+    flex:none !important; width:100% !important; max-width:100% !important;
+    justify-content:flex-end !important; flex-direction:row !important;
+    gap:10px !important; min-height:37px !important;
+  }
+  .enterprise-pelindo-logo {width:auto !important; height:40px !important; max-width:59% !important;}
+  .enterprise-danantara-logo {width:auto !important; height:36px !important; max-width:36% !important;}
+  .enterprise-logo-separator {display:block !important; height:26px !important; }
+
+  /* Recover Streamlit native sidebar drawer toggle hidden by older CSS. */
+  [data-testid="stHeader"] {
+    display:flex !important; visibility:visible !important;
+    height:0 !important; min-height:0 !important; background:transparent !important;
+    z-index:10050 !important; pointer-events:none !important;
+  }
+  [data-testid="stHeader"] [data-testid="stToolbar"],
+  [data-testid="stHeader"] [data-testid="stDecoration"] {display:none !important;}
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"] {
+    display:flex !important; visibility:visible !important;
+    position:fixed !important; top:12px !important; left:11px !important;
+    width:36px !important; height:36px !important;
+    padding:3px !important; border-radius:9px !important;
+    background:rgba(255,255,255,.96) !important;
+    box-shadow:0 1px 8px rgba(15,66,120,.13) !important;
+    border:1px solid #d7e4f4 !important;
+    z-index:10060 !important; pointer-events:auto !important;
+  }
+  [data-testid="collapsedControl"] button,
+  [data-testid="stSidebarCollapsedControl"] button {pointer-events:auto !important;}
+  section[data-testid="stSidebar"] {
+    width:min(320px,88vw) !important; min-width:0 !important;
+    max-width:88vw !important; z-index:10080 !important;
+  }
+  section[data-testid="stSidebar"] > div:first-child {
+    height:100dvh !important; min-height:0 !important;
+    overflow-y:auto !important; overscroll-behavior:contain;
+    padding:19px 14px 30px !important;
+  }
+  .bima-sidebar-bottom-brand {margin:35px 10px 12px !important;}
+  .st-key-bima_mobile_menu {
+    display:block !important; width:100% !important;
+    margin:8px 0 20px !important; padding:12px 13px 6px !important;
+    background:rgba(255,255,255,.97) !important;
+    border:1px solid #dce8f7 !important; border-radius:12px !important;
+    box-shadow:0 3px 12px rgba(25,70,129,.05) !important;
+  }
+  .st-key-bima_mobile_menu [data-testid="stSelectbox"] {width:100% !important;}
+  .st-key-bima_mobile_menu [data-testid="stSelectbox"] > div > div {min-height:44px !important;}
+
+  /* Streamlit's native columns cannot be allowed to retain desktop minimum widths. */
+  div[data-testid="stHorizontalBlock"] {display:flex !important; flex-wrap:wrap !important; gap:12px !important;}
+  div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+    flex:1 1 100% !important; width:100% !important; max-width:100% !important;
+    min-width:0 !important;
+  }
+  /* More specific than the tablet 4-column rule: each activity / request / approval
+     card stacks vertically on phones instead of retaining cramped half-width cells. */
+  div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(4))
+    > div[data-testid="stColumn"] {
+    flex:1 1 100% !important; width:100% !important; max-width:100% !important;
+  }
+  /* KPI blocks alone may remain two per row on phones with enough width. */
+  div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(4)):has(.bima-metric-card)
+    > div[data-testid="stColumn"] {
+    flex:1 1 calc(50% - 7px) !important; width:calc(50% - 7px) !important; max-width:100% !important;
+  }
+  div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:has(.bima-responsive-empty-spacer) {
+    display:none !important;
+  }
+  .bima-responsive-empty-spacer {display:none !important;}
+  .bima-page-head { margin:10px 0 16px !important; padding:0 !important; min-height:0 !important; }
+  .bima-page-head h1 {font-size:clamp(24px,6vw,31px) !important; line-height:1.15 !important;}
+  .bima-page-head p {font-size:13px !important; line-height:1.55 !important;}
+  .enterprise-dashboard-date {margin:0 0 8px !important; text-align:left !important; width:100% !important;}
+  .ux-overview {padding:15px !important; margin:8px 0 15px !important;}
+  .ux-overview-title {flex-direction:column !important; gap:7px !important;}
+  .ux-overview-aside {text-align:left !important; max-width:100% !important;}
+  .ux-overview-track {grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important;}
+  .ux-overview-step {padding:10px 9px !important; gap:7px !important;}
+  .ux-overview-step::after {display:none !important;}
+  .ux-overview-meta {min-width:0; flex:1 1 85px !important;}
+  .bima-metric-card {min-height:132px !important; padding:15px !important; margin:0 !important;}
+  .bima-metric-layout {gap:10px !important;}
+  .bima-metric-icon {width:36px !important; height:36px !important; flex:0 0 36px !important;}
+  .bima-metric-value {font-size:clamp(21px,5.5vw,28px) !important;}
+  .bima-metric-note {font-size:11.5px !important;}
+  div[data-testid="stVerticalBlockBorderWrapper"] > div {padding:14px 13px !important;}
+  .bima-role-hero {flex-wrap:wrap !important; padding:15px !important;}
+  .bima-role-hero strong {font-size:16px !important;}
+  .ux-material-comparison {grid-template-columns:1fr !important; gap:8px !important;}
+  .ux-timeline {grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important;}
+  .ux-preview-top {flex-wrap:wrap !important;}
+  .bima-section-title h3 {font-size:18px !important;}
+  .bima-section-title {flex-wrap:wrap;}
+  .bima-form-titlebar {flex-wrap:wrap !important; gap:10px !important;}
+  .bima-form-panel-head {padding:12px 11px !important;}
+  .bima-form-panel-head span {overflow-wrap:anywhere;}
+  .profile-kv {grid-template-columns:minmax(0,1fr) !important;}
+  .profile-kv .k {padding:9px 4px 1px !important; border:0 !important; font-size:11px !important;}
+  .profile-kv .v {padding:3px 4px 10px !important; font-size:13px !important;}
+  .document-info-list > div {min-width:0; overflow-wrap:anywhere;}
+  .bima-pdf-toolbar {flex-wrap:wrap !important; gap:5px !important; overflow-wrap:anywhere;}
+  .bima-readonly-table {min-width:620px !important;}
+  .bima-readonly-table-wrap {display:block !important; max-width:100% !important; overflow-x:auto !important;}
+  [data-testid="stDataFrame"], [data-testid="stTable"] {max-width:100% !important; overflow-x:auto !important;}
+  .ux-list-sub, .ux-list-final, .ux-list-pending {line-height:1.5 !important;}
+  .ux-stage-name {font-size:13px !important;}
+  .status-badge {display:inline-flex !important; max-width:100% !important; white-space:normal !important;}
+  [data-testid="stButton"] button, [data-testid="stDownloadButton"] button,
+  [data-testid="stLinkButton"] a, [data-testid="stFormSubmitButton"] button {
+    min-height:44px !important; white-space:normal !important; line-height:1.35 !important;
+  }
+  /* 16px prevents iOS automatic zoom when input fields receive focus. */
+  [data-testid="stTextInput"] input,[data-testid="stNumberInput"] input,
+  [data-testid="stDateInput"] input,[data-testid="stTextArea"] textarea,
+  [data-testid="stSelectbox"] input,[data-testid="stSelectbox"] > div > div,
+  [data-testid="stMultiSelect"] input {font-size:16px !important;}
+  [data-testid="stFileUploaderDropzone"] {max-width:100% !important;}
+  [data-testid="stImage"] img {max-width:100% !important; height:auto !important;}
+}
+
+/* Narrow phones: full-width KPI cards and single-file approval path. */
+@media (max-width:380px) {
+  [data-testid="stMainBlockContainer"] {padding-left:11px !important; padding-right:11px !important;}
+  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
+    margin-left:-11px !important; margin-right:-11px !important;
+    padding-left:11px !important; padding-right:11px !important;
+  }
+  .enterprise-header-brand strong {font-size:15px !important;}
+  .enterprise-responsive-header .enterprise-company-logos {justify-content:center !important;gap:7px !important;}
+  .enterprise-pelindo-logo {max-width:59% !important; height:33px !important;}
+  .enterprise-danantara-logo {max-width:36% !important; height:30px !important;}
+  div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(4)):has(.bima-metric-card)
+    > div[data-testid="stColumn"] {
+    flex:1 1 100% !important; width:100% !important; max-width:100% !important;
+  }
+  .bima-metric-card {min-height:105px !important;}
+  .bima-metric-layout {flex-direction:row !important;}
+  .ux-overview-track {grid-template-columns:minmax(0,1fr) !important;}
+  .ux-timeline {grid-template-columns:repeat(2,minmax(0,1fr)) !important;}
+  .bima-mobile-navigation-heading {align-items:flex-start; flex-direction:column; gap:2px;}
+}
+
+@media (max-height:650px) and (max-width:820px) {
+  .bima-sidebar-bottom-brand {display:none !important;}
+}
+
+"""
+
+
 def _inject_theme_css() -> None:
     mode = st.session_state.get("theme_mode", "light")
     if mode == "dark":
@@ -6522,7 +6792,22 @@ def _render_login() -> None:
           [data-testid="stForm"] input {{ min-height:40px !important; border:1px solid #D9E2EC !important; border-radius:6px !important; font-size:12px !important; box-shadow:none !important; }}
           [data-testid="stFormSubmitButton"] button {{ min-height:40px !important; border-radius:6px !important; background:#0066B3 !important; border-color:#0066B3 !important; font-size:12px !important; font-weight:650 !important; box-shadow:none !important; }}
           .login-corporate-note {{ margin-top:13px !important; padding-top:11px !important; font-size:9.5px !important; color:#8D9AA7 !important; }}
-          @media (max-width:768px) {{ .login-side-copy,.login-footer-copy {{ display:none !important; }} .login-logos {{ top:3vh !important; }} }}
+          @media (max-width:820px) {{
+            .login-side-copy,.login-footer-copy {{display:none !important;}}
+            .login-logos {{left:10px !important; right:10px !important; top:3vh !important;
+                display:flex !important; flex-wrap:wrap !important; justify-content:center !important;
+                gap:12px !important; max-width:calc(100vw - 20px) !important;}}
+            .login-logos img:first-child {{width:auto !important;max-width:35vw !important;max-height:38px !important;}}
+            .login-logos img:last-child {{width:auto !important;max-width:51vw !important;max-height:38px !important;}}
+            [data-testid="stMainBlockContainer"] {{padding:0 12px 22px !important;}}
+            div[data-testid="stHorizontalBlock"] {{display:flex !important;flex-wrap:wrap !important;gap:0 !important;}}
+            div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{flex:1 1 100% !important;min-width:0 !important;width:100% !important;}}
+            [data-testid="stForm"] {{width:100% !important;max-width:min(410px,100%) !important;
+                padding:22px 17px !important;}}
+            [data-testid="stForm"] input {{font-size:16px !important;min-height:44px !important;}}
+            [data-testid="stFormSubmitButton"] button {{min-height:46px !important;}}
+            .bima-login-spacer {{height:clamp(85px,14vh,135px) !important;}}
+          }}
         </style>
         <div class="login-logos">
           <img src="{danantara}" alt="Danantara Indonesia">
@@ -6534,7 +6819,7 @@ def _render_login() -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div style="height:18vh"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="bima-login-spacer" style="height:18vh"></div>', unsafe_allow_html=True)
     left, center, right = st.columns([1.25, 0.76, 1.25], gap="large")
     with center:
         with st.form("login_form", clear_on_submit=False):
@@ -6603,6 +6888,7 @@ def _render_app() -> None:
     _inject_theme_css()
     _inject_usability_css()
     _inject_enterprise_css()
+    _inject_responsive_css()
     user = _current_user()
     request_service = RequestService()
     approval_service = ApprovalService(request_service)
@@ -6670,6 +6956,7 @@ def _render_app() -> None:
 
     if render_header(user, notification_count):
         _logout(user)
+    render_mobile_navigation(user, str(st.session_state.get('current_page', PAGE_DASHBOARD)))
 
     try:
         page = str(st.session_state.get("current_page", PAGE_DASHBOARD))
