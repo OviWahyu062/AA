@@ -48,6 +48,7 @@ _DEPENDENCIES = {
     "reportlab": "reportlab>=4.2,<5.0",
     "fitz": "PyMuPDF>=1.24,<2.0",
     "qrcode": "qrcode[pil]>=7.4,<9.0",
+    "extra_streamlit_components": "extra-streamlit-components>=0.1.60,<1.0",
 }
 
 def _ensure_dependencies_fallback() -> None:
@@ -196,13 +197,18 @@ ROLE_L4 = "Approver L4"
 ALL_ROLES = (ROLE_USER, ROLE_L1, ROLE_L2, ROLE_L3, ROLE_L4)
 APPROVER_ROLES = (ROLE_L1, ROLE_L2, ROLE_L3, ROLE_L4)
 
+# Internal role IDs remain stable for existing Google Sheets and session cookies.
+# The titles and responsibilities now follow the revised business workflow.
 ROLE_TITLES = {
-    ROLE_USER: "Pemohon / User",
-    ROLE_L1: "Admin Peralatan Area",
-    ROLE_L2: "Manper Area",
-    ROLE_L3: "Manager Akuntansi",
-    ROLE_L4: "Manager Persediaan",
+    ROLE_USER: "Site Pengaju",
+    ROLE_L1: "PIC Area",
+    ROLE_L2: "PIC Keuangan",
+    ROLE_L3: "PIC Persediaan",
+    ROLE_L4: "Manager Area",
 }
+DESCRIPTION_MAX_LENGTH = 40
+LEVEL_ROLE = {"L1": ROLE_L1, "L2": ROLE_L2, "L3": ROLE_L3, "L4": ROLE_L4}
+
 
 STATUS_SUBMITTED = "SUBMITTED"
 STATUS_PENDING_L1 = "PENDING_L1"
@@ -292,6 +298,114 @@ def canonical_status(value: Any) -> str:
     return aliases.get(key, raw)
 
 
+def _site_actor_name(site: Any) -> str:
+    """Dynamic requester label: the request's actual site, not a generic user role."""
+    name = str(site or "").strip()
+    if " - " in name:
+        name = name.split(" - ", 1)[1].strip()
+    if not name:
+        return "Site Pengaju"
+    return name if name.lower().startswith(("site ", "bima site ")) else f"Site {name}"
+
+
+def role_title(role: Any, site: Any = "") -> str:
+    role = normalize_role(str(role or ""))
+    if role == ROLE_USER:
+        return _site_actor_name(site)
+    return ROLE_TITLES.get(role, str(role or ""))
+
+
+def history_level_title(level: Any, site: Any = "") -> str:
+    level = str(level or "").strip().upper()
+    if level == "SUBMITTED":
+        return _site_actor_name(site)
+    return ROLE_TITLES.get(LEVEL_ROLE.get(level, ""), level)
+
+
+def historical_actor_title(event: Any, site: Any = "") -> str:
+    """Preserve recorded historical job titles without changing current role labels."""
+    level = str(event.get("level", "")).strip().upper()
+    if level == "SUBMITTED":
+        return _site_actor_name(site)
+    recorded = str(event.get("jabatan", "") or "").strip()
+    if recorded and recorded.lower() not in {"nan", "none", "null", "-"}:
+        return recorded
+    return history_level_title(level, site)
+
+
+def _description_part(value: Any) -> str:
+    text_value = str(value or "").strip()
+    if text_value.lower() in {"nan", "none", "null"}:
+        return ""
+    return re.sub(r"\s+", " ", text_value)
+
+
+def original_material_description(row: Any) -> str:
+    stored = _description_part(row.get("material_description_original", ""))
+    if stored:
+        return stored
+    return "; ".join(_description_part(row.get(k, "")) for k in ("brand", "material_name", "part_number"))
+
+
+def latest_material_description(row: Any) -> str:
+    return (_description_part(row.get("material_description_current", ""))
+            or _description_part(row.get("material_description_final", ""))
+            or original_material_description(row))
+
+
+def final_material_description(row: Any) -> str:
+    if canonical_status(row.get("status", "")) != STATUS_APPROVED_FINAL:
+        return ""
+    return _description_part(row.get("material_description_final", "")) or latest_material_description(row)
+
+
+def material_description_errors(description: Any) -> list[str]:
+    value = _description_part(description)
+    errors: list[str] = []
+    if value.count(";") != 2 or any(not part.strip() for part in value.split(";")):
+        errors.append("Format wajib BRAND; NAMA BARANG; PART NUMBER (dipisahkan tepat dua titik koma).")
+    if len(value) > DESCRIPTION_MAX_LENGTH:
+        errors.append(f"Panjang deskripsi {len(value)} karakter, melebihi batas {DESCRIPTION_MAX_LENGTH} termasuk spasi dan titik koma.")
+    if not value:
+        errors.append("Deskripsi material tidak boleh kosong.")
+    return errors
+
+
+def workflow_stage_text(row: Any) -> str:
+    status = canonical_status(row.get("status", ""))
+    if status == STATUS_APPROVED_FINAL:
+        return "Selesai: disetujui Manager Area (L4)"
+    if status == STATUS_REJECTED:
+        level = _description_part(row.get("last_action_level", ""))
+        name = history_level_title(level) if level in LEVEL_ROLE else "Approval"
+        return f"Ditolak: {name} ({level})" if level in LEVEL_ROLE else "Ditolak pada tahap approval"
+    for number, role in [(1, ROLE_L1), (2, ROLE_L2), (3, ROLE_L3), (4, ROLE_L4)]:
+        if status == f"PENDING_L{number}":
+            return f"Menunggu {ROLE_TITLES[role]} (L{number})"
+    return status_label(status)
+
+
+def request_progress_summary(items: pd.DataFrame) -> str:
+    if items is None or items.empty:
+        return "Belum ada proses"
+    if len(items) == 1:
+        return workflow_stage_text(items.iloc[0])
+    parts: list[str] = []
+    for stage in [STATUS_PENDING_L1, STATUS_PENDING_L2, STATUS_PENDING_L3, STATUS_PENDING_L4,
+                  STATUS_APPROVED_FINAL, STATUS_REJECTED]:
+        subset = items[items["status"].astype(str) == stage]
+        if not subset.empty:
+            parts.append(f"{len(subset)} item: {workflow_stage_text(subset.iloc[0])}")
+    return " | ".join(parts) or "Belum ada proses"
+
+
+def per_item_progress_summary(items: pd.DataFrame) -> str:
+    if items is None or items.empty:
+        return "-"
+    return " | ".join(f"#{_description_part(row.get('item_no'))}: {workflow_stage_text(row)}"
+                      for _, row in items.iterrows())
+
+
 ROLE_EXPECTED_STATUS = {
     ROLE_L1: STATUS_PENDING_L1,
     ROLE_L2: STATUS_PENDING_L2,
@@ -314,11 +428,11 @@ ROLE_LEVEL = {
 }
 
 WORKFLOW_STEPS = [
-    ("SUBMITTED", "Submitted"),
-    ("L1", "L1"),
-    ("L2", "L2"),
-    ("L3", "L3"),
-    ("L4", "L4"),
+    ("SUBMITTED", "Site Pengaju"),
+    ("L1", "PIC Area"),
+    ("L2", "PIC Keuangan"),
+    ("L3", "PIC Persediaan"),
+    ("L4", "Manager Area"),
 ]
 
 PAGE_DASHBOARD = "dashboard"
@@ -500,19 +614,25 @@ ROLE_ALIASES = {
     "pemohon": ROLE_USER,
     "user": ROLE_USER,
     "pemohon user": ROLE_USER,
+    "site": ROLE_USER,
+    "site pengaju": ROLE_USER,
     "approver l1": ROLE_L1,
+    "pic area": ROLE_L1,
     "admin peralatan area": ROLE_L1,
     "admin peralatan area l1": ROLE_L1,
     "l1": ROLE_L1,
     "approver l2": ROLE_L2,
-    "manper area": ROLE_L2,
-    "manager peralatan area": ROLE_L2,
+    "pic keuangan": ROLE_L2,
+    "manager akuntansi": ROLE_L2,
     "l2": ROLE_L2,
     "approver l3": ROLE_L3,
-    "manager akuntansi": ROLE_L3,
+    "pic persediaan": ROLE_L3,
+    "manager persediaan": ROLE_L3,
     "l3": ROLE_L3,
     "approver l4": ROLE_L4,
-    "manager persediaan": ROLE_L4,
+    "manager area": ROLE_L4,
+    "manper area": ROLE_L4,
+    "manager peralatan area": ROLE_L4,
     "l4": ROLE_L4,
 }
 
@@ -529,9 +649,12 @@ def normalize_role(raw_role: str | None) -> str:
     key = " ".join(str(raw_role or "").strip().lower().replace("/", " ").split())
     if key in ROLE_ALIASES:
         return ROLE_ALIASES[key]
-    for alias, role in ROLE_ALIASES.items():
-        if alias and alias in key:
+    # Longest aliases first, so "Manager Peralatan Area" is not caught as "Manager Area".
+    for alias, role in sorted(ROLE_ALIASES.items(), key=lambda pair: len(pair[0]), reverse=True):
+        if alias and (key.startswith(alias + " ") or key.endswith(" " + alias)):
             return role
+    if key.startswith("site "):
+        return ROLE_USER
     return str(raw_role or "").strip()
 
 
@@ -550,10 +673,9 @@ def is_approver(role: str) -> bool:
 def apply_request_scope(df: pd.DataFrame, role: str, username: str = "", area: str = "") -> pd.DataFrame:
     """Apply practical visibility rules without changing approval semantics.
 
-    Pemohon sees their own requests. L1 and L2 are area-level roles and are
-    scoped to the account area when one is present. L3 and L4 can see the full
-    organizational dataset because their roles are cross-area in the supplied
-    workflow reference.
+    Site Pengaju sees only its own submissions. Approvers can access their
+    role-based workqueues; request visibility for PIC Area and Manager Area
+    remains area-filtered when their account has an assigned area.
     """
     if df.empty:
         return df
@@ -561,7 +683,7 @@ def apply_request_scope(df: pd.DataFrame, role: str, username: str = "", area: s
     scoped = df.copy()
     if role == ROLE_USER and "username" in scoped.columns:
         scoped = scoped[scoped["username"].astype(str).str.lower() == str(username).lower()]
-    elif role in {ROLE_L1, ROLE_L2} and area and "area" in scoped.columns:
+    elif role in {ROLE_L1, ROLE_L4} and area and "area" in scoped.columns:
         scoped = scoped[scoped["area"].astype(str).str.lower() == str(area).lower()]
     return scoped
 
@@ -590,6 +712,12 @@ ACTIVITY_HEADERS = [
     "MATERIAL GROUP",
     "STATUS",
     "AKSI",
+    "DESKRIPSI MATERIAL TERKINI",
+    "DESKRIPSI MATERIAL FINAL",
+    "SUMBER REKOMENDASI",
+    "PROGRES PROSES",
+    "RINCIAN ITEM",
+    "TERAKHIR DIPROSES",
 ]
 
 REQUEST_HEADERS = [
@@ -622,6 +750,12 @@ REQUEST_HEADERS = [
     "rejected_at",
     "rejected_by",
     "rejection_note",
+    "material_description_original",
+    "material_description_current",
+    "material_description_final",
+    "last_recommended_level",
+    "last_recommended_by",
+    "last_action_level",
 ]
 
 APPROVAL_HEADERS = [
@@ -639,6 +773,8 @@ APPROVAL_HEADERS = [
     "timestamp",
     "from_status",
     "to_status",
+    "material_description_before",
+    "material_description_after",
 ]
 
 DOCUMENT_HEADERS = [
@@ -1395,7 +1531,14 @@ USER_ALIASES = {
 
 def _canonical_user(record: dict[str, Any]) -> dict[str, str]:
     user = {key: str(first_nonempty(record, aliases, "")).strip() for key, aliases in USER_ALIASES.items()}
-    user["role"] = normalize_role(user["role"])
+    raw_role = user["role"]
+    # Old account sheets often store only "Approver L2/L3/L4" in role and the
+    # actual previous job title in jabatan. Prefer that title when migrating.
+    if re.fullmatch(r"(?:approver\s*)?l[1-4]", raw_role.strip(), re.IGNORECASE):
+        title_role = normalize_role(user.get("jabatan", ""))
+        user["role"] = title_role if title_role in APPROVER_ROLES else normalize_role(raw_role)
+    else:
+        user["role"] = normalize_role(raw_role)
     return user
 
 
@@ -1535,6 +1678,12 @@ REQUEST_COLUMNS = [
     "rejected_at",
     "rejected_by",
     "rejection_note",
+    "material_description_original",
+    "material_description_current",
+    "material_description_final",
+    "last_recommended_level",
+    "last_recommended_by",
+    "last_action_level",
 ]
 
 
@@ -1600,6 +1749,38 @@ class RequestService:
         df = _to_dataframe(read_records(SHEET_REQUESTS, fresh=fresh), REQUEST_COLUMNS)
         if not df.empty and "status" in df.columns:
             df["status"] = df["status"].map(canonical_status)
+            # Legacy requests may have L1 recommendations only in Data Approval.
+            # Reconstruct them for display without rewriting archived records.
+            missing = df["material_description_current"].fillna("").astype(str).str.strip() == ""
+            approved_recs: dict[tuple[str, str], tuple[str, str, str]] = {}
+            if missing.any() and worksheet_exists(SHEET_APPROVALS):
+                for entry in read_records(SHEET_APPROVALS, fresh=fresh):
+                    entry = {normalize_header(k): v for k, v in entry.items()}
+                    if str(entry.get("action", "")).upper() != "APPROVED":
+                        continue
+                    level = str(entry.get("level", "")).upper()
+                    if level not in {"L1", "L3"}:
+                        continue
+                    rec = _description_part(entry.get("recommended_material_name", ""))
+                    if rec:
+                        key = (str(entry.get("request_id", "")).strip(),
+                               str(entry.get("item_no", "")).strip())
+                        approved_recs[key] = (rec, level, str(entry.get("approver_name", "")))
+            for idx, row in df.iterrows():
+                orig = original_material_description(row)
+                current = _description_part(row.get("material_description_current", ""))
+                if not current:
+                    legacy = approved_recs.get((str(row.get("request_id", "")).strip(),
+                                                str(row.get("item_no", "")).strip()))
+                    current = legacy[0] if legacy else orig
+                    if legacy:
+                        df.at[idx, "last_recommended_level"] = legacy[1]
+                        df.at[idx, "last_recommended_by"] = legacy[2]
+                df.at[idx, "material_description_original"] = orig
+                df.at[idx, "material_description_current"] = current
+                if canonical_status(row.get("status")) == STATUS_APPROVED_FINAL:
+                    df.at[idx, "material_description_final"] = (
+                        _description_part(row.get("material_description_final")) or current)
         return df
 
     def get_request_headers_df(self, fresh: bool = False) -> pd.DataFrame:
@@ -1618,6 +1799,14 @@ class RequestService:
             first["pending_item_count"] = int(group["status"].astype(str).str.startswith("PENDING_").sum())
             first["status"] = aggregate_item_status(group)
             first["material_name_display"] = names[0] if len(names) == 1 else f"{names[0]} +{len(names)-1} item"
+            descriptions = [latest_material_description(row) for _, row in group.iterrows()]
+            first["material_description_display"] = (descriptions[0] if len(descriptions) == 1
+                                                     else f"{descriptions[0]} +{len(descriptions)-1} item")
+            final_descriptions = [final_material_description(row) for _, row in group.iterrows()]
+            first["material_description_final_display"] = (final_descriptions[0] if len(group) == 1
+                                                           else f"{sum(bool(v) for v in final_descriptions)}/{len(group)} item final")
+            first["progress_summary"] = request_progress_summary(group)
+            first["progress_detail"] = per_item_progress_summary(group)
             unique_groups = list(dict.fromkeys(groups))
             first["material_group_display"] = unique_groups[0] if len(unique_groups) == 1 else f"{unique_groups[0]} +{len(unique_groups)-1}"
             headers.append(first)
@@ -1742,10 +1931,19 @@ class RequestService:
             "rejected_at": "",
             "rejected_by": "",
             "rejection_note": "",
+            "last_action_level": "SUBMITTED",
         }
         rows = []
         for idx, item in enumerate(items, start=1):
-            rows.append({**base, "item_no": idx, **item})
+            original = original_material_description(item)
+            rows.append({
+                **base, "item_no": idx, **item,
+                "material_description_original": original,
+                "material_description_current": original,
+                "material_description_final": "",
+                "last_recommended_level": "",
+                "last_recommended_by": "",
+            })
         append_dicts(SHEET_REQUESTS, rows)
 
         if worksheet_exists(SHEET_APPROVALS):
@@ -1759,7 +1957,7 @@ class RequestService:
                         "level": "SUBMITTED",
                         "approver_name": user.get("nama", ""),
                         "approver_username": user.get("username", ""),
-                        "jabatan": user.get("jabatan", "Pemohon"),
+                        "jabatan": _site_actor_name(payload.get("site")),
                         "action": "SUBMITTED",
                         "note": f"Item #{idx} diajukan dalam permintaan master material.",
                         "timestamp": created_at,
@@ -1792,52 +1990,91 @@ class RequestService:
         )
 
     def upsert_activity(self, request_id: str, fresh: bool = False) -> None:
+        """Persist a request snapshot for integrations; request rows remain source of truth."""
         if not worksheet_exists(SHEET_ACTIVITY):
             return
         detail = self.get_request(request_id, fresh=fresh)
         if not detail:
             return
         first = detail.header
-        summary_status = aggregate_item_status(detail.items)
-        material_names = [str(v).strip() for v in detail.items["material_name"].tolist() if str(v).strip()]
-        groups = [str(v).strip() for v in detail.items["material_group"].tolist() if str(v).strip()]
-        material_display = material_names[0] if len(material_names) <= 1 else f"{material_names[0]} +{len(material_names)-1} item"
-        group_display = groups[0] if len(set(groups)) <= 1 else f"{groups[0]} +{len(set(groups))-1}"
+        rows = detail.items
+        latest = [latest_material_description(row) for _, row in rows.iterrows()]
+        final = [final_material_description(row) for _, row in rows.iterrows()]
+        groups = [str(v).strip() for v in rows["material_group"].tolist() if str(v).strip()]
+        current_desc = latest[0] if len(latest) == 1 else f"{latest[0]} +{len(latest)-1} item"
+        final_desc = final[0] if len(final) == 1 else f"{sum(bool(v) for v in final)}/{len(final)} item final"
+        last_update = max((str(v) for v in rows["last_action_at"].tolist() if str(v).strip()), default="")
+        recommended = [r for _, r in rows.iterrows() if _description_part(r.get("last_recommended_level"))]
+        source = ("Lihat rekomendasi per item" if len(rows) > 1 else
+                  f"{history_level_title(recommended[-1].get('last_recommended_level'))} "
+                  f"({recommended[-1].get('last_recommended_level')})" if recommended else "Site Pengaju")
         upsert_dict(
-            SHEET_ACTIVITY,
-            "REQ ID",
-            request_id,
+            SHEET_ACTIVITY, "REQ ID", request_id,
             {
                 "REQ ID": request_id,
                 "TANGGAL": format_short_date(first.get("created_at")),
                 "PEMOHON": first.get("nama_pemohon", ""),
                 "SITE": first.get("site", ""),
-                "NAMA BARANG": material_display,
-                "MATERIAL GROUP": group_display,
-                "STATUS": summary_status or first.get("status", ""),
+                "NAMA BARANG": current_desc,
+                "MATERIAL GROUP": (groups[0] if len(set(groups)) <= 1 else f"{groups[0]} +{len(set(groups))-1}") if groups else "-",
+                "STATUS": aggregate_item_status(rows),
                 "AKSI": "Detail",
+                "DESKRIPSI MATERIAL TERKINI": current_desc,
+                "DESKRIPSI MATERIAL FINAL": final_desc,
+                "SUMBER REKOMENDASI": source,
+                "PROGRES PROSES": request_progress_summary(rows),
+                "RINCIAN ITEM": per_item_progress_summary(rows),
+                "TERAKHIR DIPROSES": last_update,
             },
         )
 
-    def read_activity(self) -> pd.DataFrame:
-        if not worksheet_exists(SHEET_ACTIVITY):
-            return pd.DataFrame()
-        df = _to_dataframe(read_records(SHEET_ACTIVITY))
-        aliases = {
-            "req_id": ["req_id", "request_id"],
-            "tanggal": ["tanggal", "tanggal_pengajuan"],
-            "pemohon": ["pemohon", "nama_pemohon"],
-            "site": ["site"],
-            "nama_barang": ["nama_barang", "material_name"],
-            "material_group": ["material_group"],
-            "status": ["status"],
-            "aksi": ["aksi"],
-        }
-        out = pd.DataFrame()
-        for target, candidates in aliases.items():
-            source = next((c for c in candidates if c in df.columns), None)
-            out[target] = df[source] if source else ""
-        return out
+    def read_activity(self, user: dict[str, Any] | None = None) -> pd.DataFrame:
+        """Build the activity feed from live per-item data, ordered by LAST action.
+
+        Data Aktivitas Terkini is still synchronized for existing integrations,
+        but it is not used as the display source because legacy snapshots can lag.
+        """
+        items = self.get_scoped_items(user) if user else self.get_items_df()
+        if items.empty:
+            return pd.DataFrame(columns=[
+                "req_id", "tanggal", "site", "nama_barang", "material_group",
+                "status", "progress_summary", "progress_detail", "last_action_at",
+                "material_description_final", "recommendation_source",
+            ])
+        rows = []
+        for rid, group in items.groupby("request_id", sort=False, dropna=False):
+            first = group.iloc[0]
+            desc = [latest_material_description(r) for _, r in group.iterrows()]
+            final_desc = [final_material_description(r) for _, r in group.iterrows()]
+            groups = [str(v).strip() for v in group["material_group"].tolist() if str(v).strip()]
+            last_update = max((str(v) for v in group["last_action_at"].tolist() if str(v).strip()), default="")
+            last_recs = group[group["last_recommended_level"].fillna("").astype(str).str.strip() != ""]
+            if len(group) > 1:
+                source = "Lihat sumber koreksi per item"
+            elif last_recs.empty:
+                source = _site_actor_name(first.get("site"))
+            else:
+                rec_row = last_recs.iloc[0]
+                source = f"{history_level_title(rec_row.get('last_recommended_level'))} ({rec_row.get('last_recommended_level')})"
+            rows.append({
+                "req_id": str(rid),
+                "created_at": first.get("created_at", ""),
+                "tanggal": first.get("created_at", ""),
+                "site": first.get("site", ""),
+                "pemohon": first.get("nama_pemohon", ""),
+                "nama_barang": desc[0] if len(desc) == 1 else f"{desc[0]} +{len(desc)-1} item",
+                "material_group": (groups[0] if len(set(groups)) <= 1 else f"{groups[0]} +{len(set(groups))-1}") if groups else "-",
+                "status": aggregate_item_status(group),
+                "progress_summary": request_progress_summary(group),
+                "progress_detail": per_item_progress_summary(group),
+                "last_action_at": last_update,
+                "material_description_final": (final_desc[0] if len(final_desc) == 1
+                                               else f"{sum(bool(v) for v in final_desc)}/{len(group)} item final"),
+                "recommendation_source": source,
+            })
+        result = pd.DataFrame(rows)
+        result["_sort_dt"] = pd.to_datetime(result["last_action_at"], errors="coerce", utc=True)
+        return result.sort_values("_sort_dt", ascending=False).drop(columns="_sort_dt").reset_index(drop=True)
 
     def get_material_master(self) -> pd.DataFrame:
         if not worksheet_exists(SHEET_MATERIAL_GROUP):
@@ -2100,22 +2337,35 @@ class ApprovalService:
         item, role, current_status, resolved_item_no = self._authorize_item_action(request_id, item_no, user)
         next_status = NEXT_STATUS[current_status]
         timestamp = iso_now()
+        current_description = latest_material_description(item)
+        recommendation = _description_part(recommended_material_name)
 
-        material_reference = _approval_material_reference(item)
-        material_character_count = _approval_material_character_count(item)
-        recommendation = str(recommended_material_name or "").strip()
-        if role == ROLE_L1:
-            if len(recommendation) > 40:
-                raise ValueError("Rekomendasi Nama Material maksimal 40 karakter.")
-            if material_character_count > 40 and not recommendation:
+        # PIC Area (L1) and PIC Persediaan (L3) can propose replacements.
+        # The latest *approved* proposal wins; L2/L4 never overwrite it.
+        if role in {ROLE_L1, ROLE_L3}:
+            if recommendation:
+                problems = material_description_errors(recommendation)
+                if problems:
+                    raise ValueError("Rekomendasi tidak valid: " + " ".join(problems))
+                updated_description = recommendation
+            else:
+                updated_description = current_description
+            problems = material_description_errors(updated_description)
+            if problems:
                 raise ValueError(
-                    "Gabungan Brand; Nama Barang; Part Number melebihi 40 karakter. "
-                    "Approver L1 wajib memberikan Rekomendasi Nama Material maksimal 40 karakter sebelum approve."
+                    f"{ROLE_TITLES[role]} harus memberikan rekomendasi yang benar "
+                    "sebelum menyetujui item. " + " ".join(problems)
                 )
-            if material_character_count <= 40:
-                recommendation = ""
         else:
             recommendation = ""
+            updated_description = current_description
+            if role == ROLE_L4:
+                problems = material_description_errors(updated_description)
+                if problems:
+                    raise ValueError(
+                        "Manager Area tidak dapat menetapkan deskripsi material final "
+                        "yang belum memenuhi standar. " + " ".join(problems)
+                    )
 
         if not worksheet_exists(SHEET_APPROVALS):
             raise SheetsServiceError(f'Worksheet "{SHEET_APPROVALS}" belum tersedia.')
@@ -2128,12 +2378,14 @@ class ApprovalService:
                 "level": ROLE_LEVEL[role],
                 "approver_name": user.get("nama", ""),
                 "approver_username": user.get("username", ""),
-                "jabatan": user.get("jabatan", ""),
+                "jabatan": ROLE_TITLES[role],
                 "action": "APPROVED",
                 "note": note.strip(),
-                "material_reference": material_reference if role == ROLE_L1 else "",
-                "material_character_count": material_character_count if role == ROLE_L1 else "",
-                "recommended_material_name": recommendation if role == ROLE_L1 else "",
+                "material_reference": current_description,
+                "material_character_count": len(current_description),
+                "recommended_material_name": recommendation,
+                "material_description_before": current_description,
+                "material_description_after": updated_description,
                 "timestamp": timestamp,
                 "from_status": current_status,
                 "to_status": next_status,
@@ -2144,9 +2396,15 @@ class ApprovalService:
             "status": next_status,
             "current_level": "FINAL" if next_status == STATUS_APPROVED_FINAL else next_status.replace("PENDING_", ""),
             "last_action_at": timestamp,
+            "last_action_level": ROLE_LEVEL[role],
+            "material_description_current": updated_description,
         }
+        if recommendation:
+            updates["last_recommended_level"] = ROLE_LEVEL[role]
+            updates["last_recommended_by"] = str(user.get("nama", ""))
         if next_status == STATUS_APPROVED_FINAL:
             updates["final_approved_at"] = timestamp
+            updates["material_description_final"] = updated_description
         changed = update_row_by_keys(
             SHEET_REQUESTS,
             {"request_id": request_id, "item_no": resolved_item_no},
@@ -2177,7 +2435,9 @@ class ApprovalService:
             role,
             "APPROVE_ITEM",
             request_id,
-            f"Item #{resolved_item_no} ({safe_text(item.get('material_name'))}) disetujui {ROLE_LEVEL[role]}: {current_status} -> {next_status}.",
+            f"Item #{resolved_item_no} disetujui {ROLE_TITLES[role]} ({ROLE_LEVEL[role]}). "
+            f"Status {current_status} -> {next_status}. Deskripsi terkini: {updated_description}. "
+            f"Rekomendasi baru: {recommendation or '-'}.",
         )
         return next_status
 
@@ -2193,14 +2453,11 @@ class ApprovalService:
             raise ValueError("Catatan penolakan wajib diisi.")
         item, role, current_status, resolved_item_no = self._authorize_item_action(request_id, item_no, user)
         timestamp = iso_now()
-        material_reference = _approval_material_reference(item)
-        material_character_count = _approval_material_character_count(item)
-        recommendation = str(recommended_material_name or "").strip()
-        if len(recommendation) > 40:
-            raise ValueError("Rekomendasi Nama Material maksimal 40 karakter.")
+        current_description = latest_material_description(item)
         if not worksheet_exists(SHEET_APPROVALS):
             raise SheetsServiceError(f'Worksheet "{SHEET_APPROVALS}" belum tersedia.')
         ensure_sheet_columns(SHEET_APPROVALS, APPROVAL_HEADERS)
+        # A rejected proposal never becomes a material description revision.
         append_dict(
             SHEET_APPROVALS,
             {
@@ -2209,12 +2466,14 @@ class ApprovalService:
                 "level": ROLE_LEVEL[role],
                 "approver_name": user.get("nama", ""),
                 "approver_username": user.get("username", ""),
-                "jabatan": user.get("jabatan", ""),
+                "jabatan": ROLE_TITLES[role],
                 "action": "REJECTED",
                 "note": note.strip(),
-                "material_reference": material_reference if role == ROLE_L1 else "",
-                "material_character_count": material_character_count if role == ROLE_L1 else "",
-                "recommended_material_name": recommendation if role == ROLE_L1 else "",
+                "material_reference": current_description,
+                "material_character_count": len(current_description),
+                "recommended_material_name": "",
+                "material_description_before": current_description,
+                "material_description_after": current_description,
                 "timestamp": timestamp,
                 "from_status": current_status,
                 "to_status": STATUS_REJECTED,
@@ -2226,10 +2485,12 @@ class ApprovalService:
             {
                 "status": STATUS_REJECTED,
                 "current_level": "REJECTED",
+                "last_action_level": ROLE_LEVEL[role],
                 "last_action_at": timestamp,
                 "rejected_at": timestamp,
                 "rejected_by": user.get("nama", ""),
                 "rejection_note": note.strip(),
+                "material_description_final": "",
             },
         )
         if not changed:
@@ -2240,7 +2501,8 @@ class ApprovalService:
             role,
             "REJECT_ITEM",
             request_id,
-            f"Item #{resolved_item_no} ({safe_text(item.get('material_name'))}) ditolak pada {ROLE_LEVEL[role]}. Catatan: {note.strip()}",
+            f"Item #{resolved_item_no} ditolak {ROLE_TITLES[role]} ({ROLE_LEVEL[role]}). "
+            f"Deskripsi terakhir: {current_description}. Catatan: {note.strip()}",
         )
         return STATUS_REJECTED
 
@@ -2384,12 +2646,15 @@ def _document_signature_payload(detail: Any, history: pd.DataFrame) -> dict[str,
     item_fields = [
         "item_no", "material_name", "brand", "part_number", "material_type", "material_group",
         "uom", "description", "profit_center", "storage_location", "valuation_class",
-        "final_approved_at", "status",
+        "final_approved_at", "status", "material_description_original",
+        "material_description_current", "material_description_final",
+        "last_recommended_level", "last_recommended_by",
     ]
     history_fields = [
         "item_no", "level", "approver_name", "approver_username", "jabatan", "action",
         "note", "material_reference", "material_character_count", "recommended_material_name",
-        "timestamp", "from_status", "to_status",
+        "timestamp", "from_status", "to_status", "material_description_before",
+        "material_description_after",
     ]
     items_payload: list[dict[str, str]] = []
     if isinstance(detail.items, pd.DataFrame) and not detail.items.empty:
@@ -2611,7 +2876,8 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
                     ("Versi", f"V{record.get('document_version', '-')}") ,
                     ("Tanggal Terbit", format_datetime_id(record.get("issued_at", ""))),
                     ("Sistem Pengajuan", "Sistem Permintaan Master Material SAP PT BIMA"),
-                    ("Pemohon", h.get("nama_pemohon", "-")),
+                    ("Site Pengaju", _site_actor_name(h.get("site"))),
+                    ("Petugas Pengaju", h.get("nama_pemohon", "-")),
                     ("Tanggal Pengajuan", format_datetime_id(submitted_time)),
                     ("Area / Site", f"{safe_text(h.get('area'))} / {safe_text(h.get('site'))}"),
                     ("Status Dokumen", status_label(str(h.get("status", "")))),
@@ -2632,7 +2898,7 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
                         item_rows.append(
                             '<tr>'
                             f'<td>#{html.escape(safe_text(row.get("item_no")))}</td>'
-                            f'<td><strong>{html.escape(safe_text(row.get("material_name")))}</strong><br><span style="color:#8294A4">{html.escape(safe_text(row.get("brand")))} · {html.escape(safe_text(row.get("part_number")))}</span></td>'
+                            f'<td><strong>{html.escape(safe_text(final_material_description(row) or "Belum final"))}</strong><br><span style="color:#8294A4">Asal: {html.escape(safe_text(row.get("material_name")))}</span></td>'
                             f'<td><span class="verify-badge {status_class}">{status_text}</span></td>'
                             '</tr>'
                         )
@@ -2654,7 +2920,7 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
                         approval_rows.append(
                             '<tr>'
                             '<td>Submitted</td>'
-                            f'<td><strong>{html.escape(safe_text(row.get("approver_name")))}</strong><br><span style="color:#8294A4">Pemohon</span></td>'
+                            f'<td><strong>{html.escape(safe_text(row.get("approver_name")))}</strong><br><span style="color:#8294A4">{html.escape(_site_actor_name(h.get("site")))}</span></td>'
                             '<td><span class="verify-badge verify-submitted">Submitted</span></td>'
                             f'<td>{html.escape(format_datetime_id(row.get("timestamp")))}</td>'
                             '</tr>'
@@ -2669,7 +2935,7 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
                             action = str(row.get("action", "")).upper()
                             if action not in {"APPROVED", "REJECTED"}:
                                 continue
-                            key = (safe_text(row.get("approver_name")), safe_text(row.get("jabatan")), action)
+                            key = (safe_text(row.get("approver_name")), historical_actor_title(row, h.get("site")), action)
                             current = grouped.setdefault(key, {"items": [], "timestamp": row.get("timestamp", "")})
                             item_value = safe_text(row.get("item_no"))
                             if item_value != "-" and item_value not in current["items"]:
@@ -2785,11 +3051,12 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
     info_rows = [
         ["Nomor Request", safe_text(header.get("request_id"))],
         ["Tanggal Pengajuan", format_date_id(header.get("created_at"))],
-        ["Pemohon", safe_text(header.get("nama_pemohon"))],
+        ["Site Pengaju", _site_actor_name(header.get("site"))],
+        ["Petugas Pengaju", safe_text(header.get("nama_pemohon"))],
         ["Area / Site", f"{safe_text(header.get('area'))} / {safe_text(header.get('site'))}"],
-        ["Nama Barang", _material_summary(items, "material_name")],
+        ["Nama Barang Awal", _material_summary(items, "material_name")],
+        ["Deskripsi Material Final", _material_summary(items, "material_description_final")],
         ["Material Group", _material_summary(items, "material_group")],
-        ["Deskripsi / Keterangan", safe_text(header.get("description"))],
         ["Status", status_label(str(header.get("status", "")))],
     ]
     story.append(_key_value_table(info_rows, body))
@@ -2797,15 +3064,15 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
 
     if not items.empty:
         story.extend(_section_bar("A.1 DAFTAR ITEM MATERIAL & KEPUTUSAN", section))
-        item_data: list[list[Any]] = [["No", "Nama Material", "Merk", "Part Number", "Material Group", "UOM", "Keputusan"]]
+        item_data: list[list[Any]] = [["No", "Deskripsi Material Final", "Nama Barang Awal", "Part Number", "Material Group", "UOM", "Keputusan"]]
         for _, row in items.iterrows():
             item_status = canonical_status(row.get("status", ""))
             decision = "Approved Final" if item_status == STATUS_APPROVED_FINAL else ("Rejected" if item_status == STATUS_REJECTED else status_label(item_status))
             item_data.append(
                 [
                     Paragraph(safe_text(row.get("item_no")), small),
-                    Paragraph(safe_text(row.get("material_name")), small),
-                    Paragraph(safe_text(row.get("brand")), small),
+                    Paragraph(html.escape(final_material_description(row) or "Belum final"), small),
+                    Paragraph(html.escape(safe_text(row.get("material_name"))), small),
                     Paragraph(safe_text(row.get("part_number")), small),
                     Paragraph(safe_text(row.get("material_group")), small),
                     Paragraph(safe_text(row.get("uom")), small),
@@ -2814,7 +3081,7 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
             )
         item_table = Table(
             item_data,
-            colWidths=[8 * mm, 38 * mm, 23 * mm, 27 * mm, 31 * mm, 14 * mm, 25 * mm],
+            colWidths=[8 * mm, 44 * mm, 26 * mm, 25 * mm, 27 * mm, 13 * mm, 23 * mm],
             repeatRows=1,
         )
         item_table.setStyle(
@@ -2840,11 +3107,11 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
     story.extend(_section_bar("B. RIWAYAT PERSETUJUAN", section))
     hist_data: list[list[Any]] = [["Item", "Tahapan", "Jabatan / Approver", "Keputusan", "Catatan / Rekomendasi", "Tanggal / Waktu"]]
     level_labels = {
-        "SUBMITTED": "Submit Request",
-        "L1": "Approval L1",
-        "L2": "Approval L2",
-        "L3": "Approval L3",
-        "L4": "Approval L4",
+        "SUBMITTED": _site_actor_name(header.get("site")),
+        "L1": "L1 PIC Area",
+        "L2": "L2 PIC Keuangan",
+        "L3": "L3 PIC Persediaan",
+        "L4": "L4 Manager Area",
     }
     if history is None or history.empty:
         hist_data.append(["-", "-", "-", "Belum diproses", "-", "-"])
@@ -2867,7 +3134,7 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
             if note != "-":
                 notes.append(note)
             approver = safe_text(row.get("approver_name"))
-            jabatan = safe_text(row.get("jabatan"))
+            jabatan = historical_actor_title(row, header.get("site"))
             hist_data.append(
                 [
                     Paragraph(safe_text(row.get("item_no")), small),
@@ -2923,7 +3190,7 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
         {
             "label": "Diajukan oleh",
             "name": safe_text(header.get("nama_pemohon")) or "-",
-            "title": "Pemohon",
+            "title": _site_actor_name(header.get("site")),
             "signed_at": format_datetime_id(submitted_row.get("timestamp")) if submitted_row is not None else format_datetime_id(header.get("submitted_at") or header.get("created_at")),
         }
     ]
@@ -2941,7 +3208,7 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
             seen_approvers: set[tuple[str, str]] = set()
             for _, row in approved_rows.iterrows():
                 approver_name = safe_text(row.get("approver_name")) or "-"
-                approver_title = safe_text(row.get("jabatan")) or f"Approver {approval_level}"
+                approver_title = historical_actor_title(row, header.get("site"))
                 key = (approver_name, approver_title)
                 if key in seen_approvers:
                     continue
@@ -3386,7 +3653,7 @@ def render_header(user: dict, notification_count: int = 0) -> bool:
                       <div class="bima-avatar">{html.escape(initials(str(user.get('nama') or user.get('username') or 'U')))}</div>
                       <div class="bima-user-meta">
                         <strong>{html.escape(str(user.get('nama') or user.get('username') or 'Pengguna'))}</strong>
-                        <span>{html.escape(str(user.get('role') or user.get('jabatan') or ''))}</span>
+                        <span>{html.escape(role_title(user.get('role'), user.get('site')))}</span>
                       </div>
                     </div>''',
                 unsafe_allow_html=True,
@@ -3395,7 +3662,7 @@ def render_header(user: dict, notification_count: int = 0) -> bool:
             logout_clicked = False
             with st.popover("⌄", use_container_width=True):
                 st.markdown(f"**{html.escape(str(user.get('nama') or user.get('username') or 'Pengguna'))}**")
-                st.caption(str(user.get("role") or ""))
+                st.caption(role_title(user.get("role"), user.get("site")))
                 if user.get("email"):
                     st.caption(str(user.get("email")))
                 if user.get("site"):
@@ -3467,7 +3734,7 @@ def render_request_table(
     data = df.head(max_rows) if max_rows else df
     st.markdown('<span class="bima-data-table-marker"></span>', unsafe_allow_html=True)
     ratios = [1.2, 1.1, 1.3, 1.7, 2.1, 1.35, 1.18, 0.72]
-    labels = ["REQ ID", "Tanggal", "Pemohon", "Site", "Nama Barang", "Material Group", "Status", "Aksi"]
+    labels = ["REQ ID", "Tanggal", "Pengaju", "Site", "Deskripsi Material Terkini", "Material Group", "Status", "Aksi"]
     cols = st.columns(ratios, gap="small")
     for c, label in zip(cols, labels):
         with c:
@@ -3486,7 +3753,8 @@ def render_request_table(
         with cols[3]:
             _cell(row.get("site"))
         with cols[4]:
-            _cell(row.get("material_name_display") or row.get("material_name") or row.get("nama_barang"))
+            _cell(row.get("material_description_display") or row.get("material_description_current")
+                  or row.get("material_name_display") or row.get("material_name") or row.get("nama_barang"))
         with cols[5]:
             _cell(row.get("material_group_display") or row.get("material_group"))
         with cols[6]:
@@ -3507,30 +3775,72 @@ def render_request_table(
     return selected
 
 
-def _approval_material_reference(row: Any) -> str:
-    """Build the L1 material reference from Brand; Nama Barang; Part Number."""
-    def _clean(value: Any) -> str:
-        text = safe_text(value)
-        return re.sub(r"\s+", " ", text).strip() if text != "-" else "-"
+def render_activity_table(df: pd.DataFrame, key_prefix: str, *, max_rows: int = RECENT_ACTIVITY_LIMIT) -> str | None:
+    """Live activity view; the same description used by the next approver is shown."""
+    if df is None or df.empty:
+        st.markdown('<div class="bima-empty">Belum ada aktivitas permohonan.</div>', unsafe_allow_html=True)
+        return None
+    ratios = [1.14, 1.14, 1.6, 2.3, 1.8, 2.25, 1.13, 0.75]
+    labels = ["REQ ID", "Aktivitas Terakhir", "Site Pengaju", "Deskripsi Material Terkini",
+              "Deskripsi Final", "Progres Proses per Item", "Status", "Aksi"]
+    st.markdown('<span class="bima-data-table-marker"></span>', unsafe_allow_html=True)
+    for col, label in zip(st.columns(ratios, gap="small"), labels):
+        with col:
+            st.markdown(f'<div class="bima-table-head">{html.escape(label)}</div>', unsafe_allow_html=True)
+    selected = None
+    for idx, row in df.head(max_rows).reset_index(drop=True).iterrows():
+        rid = str(row.get("req_id") or row.get("request_id") or "")
+        cols = st.columns(ratios, gap="small")
+        with cols[0]:
+            _cell(rid, bold=True)
+        with cols[1]:
+            _cell(format_datetime_id(row.get("last_action_at") or row.get("created_at")))
+        with cols[2]:
+            _cell(_site_actor_name(row.get("site")))
+        with cols[3]:
+            value = html.escape(latest_material_description({"material_description_current": row.get("nama_barang", "")}))
+            source = html.escape(safe_text(row.get("recommendation_source", "Site Pengaju")))
+            st.markdown(
+                f'<div class="bima-table-cell" style="display:block;white-space:normal;overflow-wrap:anywhere;">'
+                f'<strong>{value}</strong><div style="font-size:.7rem;opacity:.76;margin-top:.3rem;">'
+                f'Sumber: {source}</div></div>', unsafe_allow_html=True,
+            )
+        with cols[4]:
+            final = _description_part(row.get("material_description_final", ""))
+            # A multi-item request may have some completed and some pending lines.
+            _cell(final if final else "Belum final")
+        with cols[5]:
+            progress = html.escape(safe_text(row.get("progress_summary")))
+            details = html.escape(safe_text(row.get("progress_detail")))
+            st.markdown(
+                f'<div class="bima-table-cell" style="display:block;white-space:normal;overflow-wrap:anywhere;">'
+                f'<strong>{progress}</strong><div style="font-size:.7rem;opacity:.76;margin-top:.3rem;">'
+                f'{details}</div></div>', unsafe_allow_html=True,
+            )
+        with cols[6]:
+            st.markdown(
+                f'<div class="bima-table-cell">{status_badge_html(str(row.get("status", "")))}</div>',
+                unsafe_allow_html=True,
+            )
+        with cols[7]:
+            if st.button("Detail", key=f"{key_prefix}_{idx}_{rid}", use_container_width=True):
+                selected = rid
+    return selected
 
-    return "; ".join([
-        _clean(row.get("brand", "")),
-        _clean(row.get("material_name", "")),
-        _clean(row.get("part_number", "")),
-    ])
+
+def _approval_material_reference(row: Any) -> str:
+    """Original user composition, separated by semicolons."""
+    return original_material_description(row)
 
 
 def _approval_material_compact_reference(row: Any) -> str:
-    """Match the supplied HTML character-count rule: remove whitespace and join with colon."""
-    parts = []
-    for field in ("brand", "material_name", "part_number"):
-        value = safe_text(row.get(field, ""))
-        parts.append(re.sub(r"\s+", "", value))
-    return ":".join(parts)
+    """Backward-compatible alias without removing counted spaces or delimiters."""
+    return _approval_material_reference(row)
 
 
 def _approval_material_character_count(row: Any) -> int:
-    return len(_approval_material_compact_reference(row))
+    # Include spaces and every semicolon in the official 40-character limit.
+    return len(_approval_material_reference(row))
 
 
 def _approval_site_plant(row: Any) -> str:
@@ -3546,29 +3856,29 @@ def _approval_date(row: Any) -> str:
 
 
 def render_approval_item_table(df: pd.DataFrame, key_prefix: str, role: str) -> tuple[str, Any] | None:
-    """Render the Approval Workspace using the role-specific table from the HTML reference."""
+    """Role-specific workqueue, always using the latest description as reference."""
     if df is None or df.empty:
         st.markdown('<div class="bima-empty">Belum ada item material yang menunggu approval pada level ini.</div>', unsafe_allow_html=True)
         return None
-
     st.markdown('<span class="bima-data-table-marker bima-approval-table-marker"></span>', unsafe_allow_html=True)
-
     if role == ROLE_L1:
         ratios = [1.15, 1.7, 4.0, 1.15, 0.95]
-        labels = ["ID Req", "Plant", "Brand; Nama Barang; Part Number", "Status", "Aksi"]
-    elif role == ROLE_L3:
-        ratios = [1.05, 0.9, 1.75, 1.9, 1.65, 1.75, 1.1, 0.9]
-        labels = ["ID Req", "Tanggal", "Site (Plant)", "Nama Barang", "Profit Center", "Valuation Class", "Status", "Aksi"]
-    elif role == ROLE_L4:
-        ratios = [1.05, 0.9, 1.75, 1.9, 1.7, 1.8, 1.1, 0.9]
-        labels = ["ID Req", "Tanggal", "Site (Plant)", "Nama Barang", "Material Type", "Material Group", "Status", "Aksi"]
+        labels = ["ID Req", "Plant", "Deskripsi Material dari Site", "Status", "Aksi"]
     else:
-        ratios = [1.05, 0.9, 1.25, 1.7, 1.85, 1.55, 1.1, 0.9]
-        labels = ["ID Req", "Tanggal", "Pemohon", "Site (Plant)", "Nama Barang", "Profit Center", "Status", "Aksi"]
+        ratios = [1.05, 0.9, 1.5, 2.25, 1.65, 1.65, 1.1, 0.9]
+        if role == ROLE_L2:
+            labels = ["ID Req", "Tanggal", "Site Pengaju", "Deskripsi Terkini",
+                      "Profit Center", "Valuation Class", "Status", "Aksi"]
+        elif role == ROLE_L3:
+            labels = ["ID Req", "Tanggal", "Site Pengaju", "Deskripsi Terkini",
+                      "Material Type", "Material Group", "Status", "Aksi"]
+        else:
+            labels = ["ID Req", "Tanggal", "Site Pengaju", "Deskripsi Terkini",
+                      "Material Group", "Profit Center", "Status", "Aksi"]
 
     cols = st.columns(ratios, gap="small")
-    for c, label in zip(cols, labels):
-        with c:
+    for col, label in zip(cols, labels):
+        with col:
             st.markdown(f'<div class="bima-table-head">{html.escape(label)}</div>', unsafe_allow_html=True)
 
     selected: tuple[str, Any] | None = None
@@ -3576,65 +3886,45 @@ def render_approval_item_table(df: pd.DataFrame, key_prefix: str, role: str) -> 
         rid = str(row.get("request_id", ""))
         item_no = row.get("item_no", "")
         cols = st.columns(ratios, gap="small")
-
         with cols[0]:
             st.markdown(
                 f'<div class="bima-table-cell" style="display:block;padding-top:.45rem;">'
                 f'<strong>{html.escape(rid)}</strong>'
                 f'<div style="font-size:.62rem;color:#8192A1;margin-top:.15rem;">Item #{html.escape(safe_text(item_no))}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
+                f'</div>', unsafe_allow_html=True,
             )
-
         if role == ROLE_L1:
             with cols[1]:
-                st.markdown(
-                    f'<div class="bima-table-cell" style="display:block;padding-top:.42rem;">'
-                    f'<strong>{html.escape(safe_text(row.get("site_code")))}</strong>'
-                    f'<div style="font-size:.62rem;color:#8192A1;margin-top:.15rem;">{html.escape(safe_text(row.get("site")))}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            material_ref = _approval_material_reference(row)
-            char_count = _approval_material_character_count(row)
-            count_color = "#C84545" if char_count > 40 else "#118959"
-            count_text = "Wajib rekomendasi L1" if char_count > 40 else "Sesuai batas ≤ 40"
+                _cell(_approval_site_plant(row))
+            source = original_material_description(row)
+            problems = material_description_errors(source)
             with cols[2]:
                 st.markdown(
-                    f'<div class="bima-table-cell" style="display:block;padding-top:.42rem;">'
-                    f'<strong>{html.escape(material_ref)}</strong>'
-                    f'<div style="font-size:.62rem;color:{count_color};margin-top:.18rem;font-weight:700;">{char_count} karakter · {count_text}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
+                    f'<div class="bima-table-cell" style="display:block;white-space:normal;overflow-wrap:anywhere;">'
+                    f'<strong>{html.escape(source)}</strong><div style="font-size:.7rem;'
+                    f'color:{"#C84545" if problems else "#118959"};margin-top:.2rem;">'
+                    f'{len(source)}/{DESCRIPTION_MAX_LENGTH} karakter · {"Perlu koreksi" if problems else "Sesuai standar"}'
+                    f'</div></div>', unsafe_allow_html=True,
                 )
             status_col, action_col = 3, 4
-        elif role == ROLE_L3:
-            with cols[1]: _cell(_approval_date(row))
-            with cols[2]: _cell(_approval_site_plant(row))
-            with cols[3]: _cell(row.get("material_name"), bold=True)
-            with cols[4]: _cell(row.get("profit_center"))
-            with cols[5]: _cell(row.get("valuation_class"))
-            status_col, action_col = 6, 7
-        elif role == ROLE_L4:
-            with cols[1]: _cell(_approval_date(row))
-            with cols[2]: _cell(_approval_site_plant(row))
-            with cols[3]: _cell(row.get("material_name"), bold=True)
-            with cols[4]: _cell(row.get("material_type"))
-            with cols[5]: _cell(row.get("material_group"))
-            status_col, action_col = 6, 7
         else:
             with cols[1]: _cell(_approval_date(row))
-            with cols[2]: _cell(row.get("nama_pemohon"))
-            with cols[3]: _cell(_approval_site_plant(row))
-            with cols[4]: _cell(row.get("material_name"), bold=True)
-            with cols[5]: _cell(row.get("profit_center"))
+            with cols[2]: _cell(_site_actor_name(row.get("site")))
+            with cols[3]: _cell(latest_material_description(row), bold=True)
+            if role == ROLE_L2:
+                with cols[4]: _cell(row.get("profit_center"))
+                with cols[5]: _cell(row.get("valuation_class"))
+            elif role == ROLE_L3:
+                with cols[4]: _cell(row.get("material_type"))
+                with cols[5]: _cell(row.get("material_group"))
+            else:
+                with cols[4]: _cell(row.get("material_group"))
+                with cols[5]: _cell(row.get("profit_center"))
             status_col, action_col = 6, 7
 
         with cols[status_col]:
-            st.markdown(
-                f'<div class="bima-table-cell">{status_badge_html(str(row.get("status", "")))}</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<div class="bima-table-cell">{status_badge_html(str(row.get("status", "")))}</div>',
+                        unsafe_allow_html=True)
         with cols[action_col]:
             if st.button("Proses Review", key=f"{key_prefix}_review_{idx}_{rid}_{item_no}", use_container_width=True):
                 selected = (rid, item_no)
@@ -3642,74 +3932,81 @@ def render_approval_item_table(df: pd.DataFrame, key_prefix: str, role: str) -> 
 
 
 def render_approval_review_information(role: str, item_row: dict[str, Any], history: pd.DataFrame) -> None:
-    """Show only the attributes relevant to the active approval level."""
+    """Show original, working and final descriptions at every approval level."""
     request_id = safe_text(item_row.get("request_id"))
-    common = [("ID Request", request_id)]
-    if role == ROLE_L1:
-        material_ref = _approval_material_reference(item_row)
-        char_count = _approval_material_character_count(item_row)
-        rows = common + [
-            ("Plant", _approval_site_plant(item_row)),
-            ("Brand; Nama Barang; Part Number", material_ref),
-            ("Jumlah Karakter", f"{char_count} karakter"),
-        ]
-    elif role == ROLE_L2:
-        rows = common + [
-            ("Tanggal", _approval_date(item_row)),
-            ("Pemohon", item_row.get("nama_pemohon")),
-            ("Site (Plant)", _approval_site_plant(item_row)),
-            ("Nama Barang", item_row.get("material_name")),
-            ("Profit Center", item_row.get("profit_center")),
-        ]
+    current = latest_material_description(item_row)
+    original = original_material_description(item_row)
+    source_level = str(item_row.get("last_recommended_level", "") or "").strip()
+    source = history_level_title(source_level) if source_level in LEVEL_ROLE else _site_actor_name(item_row.get("site"))
+    rows = [
+        ("ID Request", request_id),
+        ("Site Pengaju", _site_actor_name(item_row.get("site"))),
+        ("Plant", _approval_site_plant(item_row)),
+        ("Deskripsi Material dari Site", original),
+        ("Deskripsi Material Terkini", current),
+        ("Rekomendasi Terakhir dari", source),
+        ("Jumlah Karakter Terkini", f"{len(current)}/{DESCRIPTION_MAX_LENGTH}"),
+        ("Standar Penulisan", "Sesuai" if not material_description_errors(current) else "Perlu koreksi"),
+        ("Tahap Proses", workflow_stage_text(item_row)),
+    ]
+    if role == ROLE_L2:
+        rows += [("Profit Center", item_row.get("profit_center")),
+                 ("Valuation Class", item_row.get("valuation_class"))]
     elif role == ROLE_L3:
-        rows = common + [
-            ("Tanggal", _approval_date(item_row)),
-            ("Site (Plant)", _approval_site_plant(item_row)),
-            ("Nama Barang", item_row.get("material_name")),
-            ("Profit Center", item_row.get("profit_center")),
-            ("Valuation Class", item_row.get("valuation_class")),
-        ]
-    else:
-        rows = common + [
-            ("Tanggal", _approval_date(item_row)),
-            ("Site (Plant)", _approval_site_plant(item_row)),
-            ("Nama Barang", item_row.get("material_name")),
-            ("Material Type", item_row.get("material_type")),
-            ("Material Group", item_row.get("material_group")),
-        ]
+        rows += [("Material Group", item_row.get("material_group")),
+                 ("Material Type", item_row.get("material_type")),
+                 ("Merk / Brand", item_row.get("brand")),
+                 ("Part Number", item_row.get("part_number"))]
+    elif role == ROLE_L4:
+        rows += [("Profit Center", item_row.get("profit_center")),
+                 ("Valuation Class", item_row.get("valuation_class")),
+                 ("Material Type", item_row.get("material_type")),
+                 ("Material Group", item_row.get("material_group"))]
     _kv(rows)
 
-    if role != ROLE_L1 and history is not None and not history.empty:
-        level_series = history["level"].astype(str).str.upper() if "level" in history.columns else pd.Series("", index=history.index)
-        action_series = history["action"].astype(str).str.upper() if "action" in history.columns else pd.Series("", index=history.index)
-        l1_rows = history[(level_series == "L1") & (action_series == "APPROVED")]
-        if not l1_rows.empty:
-            recommendation = safe_text(l1_rows.iloc[-1].get("recommended_material_name"))
-            if recommendation != "-":
-                st.info(f"Rekomendasi Nama Material dari L1: {recommendation}")
+    if history is not None and not history.empty:
+        st.markdown("**Jejak Koreksi Deskripsi Material**")
+        has_recommendation = False
+        for _, event in history.iterrows():
+            rec = _description_part(event.get("recommended_material_name", ""))
+            if rec and str(event.get("action", "")).upper() == "APPROVED":
+                level = str(event.get("level", "")).upper()
+                if level not in {"L1", "L3"}:
+                    continue
+                has_recommendation = True
+                st.caption(
+                    f"{history_level_title(level)} ({level}), {format_datetime_id(event.get('timestamp'))}: "
+                    f"{rec}"
+                )
+        if not has_recommendation:
+            st.caption("Belum ada rekomendasi yang mengubah deskripsi dari Site Pengaju.")
 
 
-def workflow_progress_html(status: str, history: pd.DataFrame) -> str:
+def workflow_progress_html(status: str, history: pd.DataFrame, site: Any = "") -> str:
+    status = canonical_status(status)
     levels_done: set[str] = set()
+    reject_level = ""
     if history is not None and not history.empty and "level" in history.columns:
         for _, row in history.iterrows():
             action = str(row.get("action", "")).upper()
             level = str(row.get("level", "")).upper()
             if action in {"SUBMITTED", "APPROVED"}:
                 levels_done.add(level)
+            if action == "REJECTED":
+                reject_level = level
 
-    steps = [("SUBMITTED", "Submitted"), ("L1", "L1"), ("L2", "L2"), ("L3", "L3"), ("L4", "L4")]
+    steps = [("SUBMITTED", _site_actor_name(site))] + [
+        (level, f"{history_level_title(level)} ({level})") for level in ("L1", "L2", "L3", "L4")
+    ]
     pending_level = str(status).replace("PENDING_", "") if str(status).startswith("PENDING_") else ""
     chunks: list[str] = []
     for idx, (level, label) in enumerate(steps, start=1):
         classes = ["workflow-step"]
-        if level in levels_done:
+        if level in levels_done or status == STATUS_APPROVED_FINAL:
             classes.append("done")
         if level == pending_level:
             classes.append("active")
-        if status == STATUS_APPROVED_FINAL:
-            classes.append("done")
-        if status == STATUS_REJECTED and level == pending_level:
+        if status == STATUS_REJECTED and level == reject_level:
             classes.append("rejected")
         chunks.append(
             f'<div class="{" ".join(classes)}"><div class="workflow-dot">{idx}</div><div>{html.escape(label)}</div></div>'
@@ -3735,6 +4032,7 @@ def render_readonly_table(df: pd.DataFrame, empty_text: str = "Belum ada data.")
 # ============================== components/request_detail.py ==============================
 def render_request_detail(detail, history: pd.DataFrame, *, show_title: bool = True) -> None:
     h = detail.header
+    items = detail.items
     if show_title:
         st.markdown(
             f'<div class="bima-card"><div class="bima-card-title">{html.escape(str(h.get("request_id", "")))}</div>'
@@ -3743,31 +4041,32 @@ def render_request_detail(detail, history: pd.DataFrame, *, show_title: bool = T
         )
         st.write("")
 
-    st.markdown(workflow_progress_html(str(h.get("status", "")), history), unsafe_allow_html=True)
+    if len(items) == 1:
+        st.markdown(workflow_progress_html(str(items.iloc[0].get("status", "")), history, h.get("site")),
+                    unsafe_allow_html=True)
+    else:
+        st.caption("Request ini memiliki beberapa item dengan progres approval yang dapat berbeda. "
+                   "Pilih rincian alur per item di bawah untuk melihat tahapan yang sudah dilalui.")
 
     left, right = st.columns([1, 1], gap="medium")
     with left:
         section_heading("Informasi Permohonan")
-        _kv(
-            [
-                ("Nomor Request", h.get("request_id")),
-                ("Tanggal Pengajuan", format_date_id(h.get("created_at"))),
-                ("Pemohon", h.get("nama_pemohon")),
-                ("Area", h.get("area")),
-                ("Site", h.get("site")),
-                ("Status", h.get("status")),
-            ]
-        )
+        _kv([
+            ("Nomor Request", h.get("request_id")),
+            ("Tanggal Pengajuan", format_date_id(h.get("created_at"))),
+            ("Site Pengaju", _site_actor_name(h.get("site"))),
+            ("Petugas Pengaju", h.get("nama_pemohon")),
+            ("Area", h.get("area")),
+            ("Status", status_label(h.get("status"))),
+        ])
     with right:
-        section_heading("Detail Kebutuhan")
-        _kv(
-            [
-                ("Profit Center", h.get("profit_center")),
-                ("Storage Location", h.get("storage_location")),
-                ("Valuation Class", h.get("valuation_class")),
-                ("Deskripsi", h.get("description")),
-            ]
-        )
+        section_heading("Atribut Administrasi")
+        _kv([
+            ("Profit Center", h.get("profit_center")),
+            ("Storage Location", h.get("storage_location")),
+            ("Valuation Class", h.get("valuation_class")),
+            ("Progres", request_progress_summary(items)),
+        ])
         if str(h.get("document_url", "")).startswith("http"):
             st.link_button("Buka Dokumen / Manual", str(h.get("document_url")), use_container_width=True)
         if str(h.get("image_url", "")).startswith("http"):
@@ -3775,43 +4074,75 @@ def render_request_detail(detail, history: pd.DataFrame, *, show_title: bool = T
 
     section_heading("Daftar Item Material")
     item_cols = ["item_no", "material_name", "brand", "part_number", "material_type", "material_group", "uom", "status"]
-    item_df = detail.items[[c for c in item_cols if c in detail.items.columns]].copy()
-    item_df.columns = [
-        {
-            "item_no": "No",
-            "material_name": "Nama Material",
-            "brand": "Merk / Brand",
-            "part_number": "Part Number",
-            "material_type": "Material Type",
-            "material_group": "Material Group",
-            "uom": "UOM",
-            "status": "Status Item",
-        }.get(c, c)
-        for c in item_df.columns
-    ]
+    item_df = items[[c for c in item_cols if c in items.columns]].copy()
+    item_df.columns = [{
+        "item_no": "No", "material_name": "Nama Barang Awal", "brand": "Merk / Brand",
+        "part_number": "Part Number", "material_type": "Material Type",
+        "material_group": "Material Group", "uom": "UOM", "status": "Status Item",
+    }.get(c, c) for c in item_df.columns]
     render_readonly_table(item_df, "Belum ada item material.")
 
-    section_heading("Riwayat Approval")
+    section_heading("Deskripsi Material dan Riwayat Koreksi", "Original tetap tersimpan; rekomendasi yang disetujui terakhir menjadi acuan dan ditetapkan final oleh L4")
+    for _, item in items.iterrows():
+        no = _description_part(item.get("item_no"))
+        status = canonical_status(item.get("status"))
+        original = original_material_description(item)
+        current = latest_material_description(item)
+        final = final_material_description(item)
+        source_level = _description_part(item.get("last_recommended_level"))
+        source = history_level_title(source_level) if source_level in LEVEL_ROLE else _site_actor_name(h.get("site"))
+        _kv([
+            (f"Item #{no} - Deskripsi dari Site", original),
+            ("Rekomendasi Terakhir / Deskripsi Terkini", current),
+            ("Sumber Rekomendasi", source),
+            ("Deskripsi Material Final", final if final else "Belum disahkan L4"),
+            ("Panjang Deskripsi Terkini", f"{len(current)}/{DESCRIPTION_MAX_LENGTH} karakter"),
+            ("Tahap Saat Ini", workflow_stage_text(item)),
+        ])
+        with st.expander(f"Alur Lengkap dan Keputusan Item #{no}", expanded=len(items) == 1):
+            item_hist = pd.DataFrame()
+            if history is not None and not history.empty and "item_no" in history.columns:
+                item_hist = history[
+                    (history["item_no"].astype(str).str.strip() == no)
+                    | (history["item_no"].astype(str).str.strip() == "")
+                ].copy()
+            st.markdown(workflow_progress_html(status, item_hist, h.get("site")), unsafe_allow_html=True)
+            st.write(f"**Posisi proses:** {workflow_stage_text(item)}")
+            if not item_hist.empty:
+                cols = ["level", "approver_name", "jabatan", "action", "material_description_before",
+                        "recommended_material_name", "material_description_after", "note", "timestamp"]
+                view = item_hist[[c for c in cols if c in item_hist.columns]].copy()
+                if "level" in view.columns:
+                    view["level"] = view["level"].map(lambda v: history_level_title(v, h.get("site")))
+                if "timestamp" in view.columns:
+                    view["timestamp"] = view["timestamp"].map(format_datetime_id)
+                view = view.rename(columns={
+                    "level": "Tahap", "approver_name": "Petugas", "jabatan": "Jabatan Tercatat", "action": "Keputusan",
+                    "material_description_before": "Deskripsi Sebelum Review",
+                    "recommended_material_name": "Rekomendasi Baru",
+                    "material_description_after": "Deskripsi Sesudah Review",
+                    "note": "Catatan", "timestamp": "Waktu",
+                })
+                render_readonly_table(view)
+            if status == STATUS_REJECTED:
+                st.error("Penolakan final: " + _description_part(item.get("rejection_note", "")))
+
+    section_heading("Riwayat Approval Seluruh Item")
     if history is None or history.empty:
         st.info("Belum ada riwayat approval.")
     else:
-        cols = ["item_no", "level", "approver_name", "jabatan", "action", "note", "timestamp"]
+        cols = ["item_no", "level", "approver_name", "jabatan", "action", "recommended_material_name", "note", "timestamp"]
         view = history[[c for c in cols if c in history.columns]].copy()
+        if "level" in view.columns:
+            view["level"] = view["level"].map(lambda v: history_level_title(v, h.get("site")))
         if "timestamp" in view.columns:
-            view["timestamp"] = view["timestamp"].apply(format_datetime_id)
-        view.columns = [
-            {
-                "item_no": "Item",
-                "level": "Tahapan",
-                "approver_name": "Approver",
-                "jabatan": "Jabatan",
-                "action": "Status",
-                "note": "Catatan",
-                "timestamp": "Tanggal / Waktu",
-            }.get(c, c)
-            for c in view.columns
-        ]
-        render_readonly_table(view, "Belum ada riwayat approval.")
+            view["timestamp"] = view["timestamp"].map(format_datetime_id)
+        view = view.rename(columns={
+            "item_no": "Item", "level": "Tahapan", "approver_name": "Petugas",
+            "jabatan": "Jabatan Tercatat", "action": "Keputusan", "recommended_material_name": "Rekomendasi Material",
+            "note": "Catatan", "timestamp": "Tanggal / Waktu",
+        })
+        render_readonly_table(view)
 
 
 def _kv(rows: list[tuple[str, object]]) -> None:
@@ -3870,11 +4201,9 @@ def render_dashboard_page(user: dict, request_service: RequestService, approval_
     st.markdown('<div class="bima-vgap-16"></div>', unsafe_allow_html=True)
     with st.container(border=True):
         st.markdown('<span class="bima-activity-panel-marker"></span>', unsafe_allow_html=True)
-        section_heading("Aktivitas Terkini", "Daftar permintaan master material yang paling baru diajukan")
-        activity = request_service.read_activity()
-        if not activity.empty:
-            activity = activity.iloc[::-1].reset_index(drop=True)
-        selected = render_request_table(activity, "dashboard_activity", max_rows=RECENT_ACTIVITY_LIMIT)
+        section_heading("Aktivitas Terkini", "Deskripsi hasil koreksi, progres setiap item, dan tahap approval terakhir")
+        activity = request_service.read_activity(user)
+        selected = render_activity_table(activity, "dashboard_activity", max_rows=RECENT_ACTIVITY_LIMIT)
     if selected:
         st.session_state["dashboard_selected_request"] = selected
 
@@ -4255,7 +4584,7 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
     if st.session_state.pop("request_success_message", ""):
         st.success(st.session_state["last_success_text"] if "last_success_text" in st.session_state else "Permintaan berhasil dikirim.")
 
-    page_heading("Form Permintaan Material", "Ajukan permintaan pembuatan master material SAP sesuai kebutuhan operasional")
+    page_heading("Form Permintaan Material", "Ajukan pembuatan master material atas nama Site yang dipilih")
     page_intro_banner(
         "Form Permintaan Master Material",
         "Rinci atribut master material SAP secara lengkap. Anda dapat menambahkan beberapa item sekaligus dalam satu ID Request sebelum dikirim ke workflow approval.",
@@ -4271,11 +4600,11 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
             unsafe_allow_html=True,
         )
 
-        _panel_head(1, "Informasi Pemohon & Lokasi Kerja", "Data ini berlaku untuk satu ID Request")
+        _panel_head(1, "Informasi Site Pengaju & Lokasi Kerja", "Nama Site menjadi identitas tahap awal workflow")
         c1, c2, c3, c4 = st.columns([1.35, 1, 1, 1.45], gap="small")
         with c1:
             nama_pemohon = st.text_input(
-                "Nama Pemohon *",
+                "Nama Petugas Pengaju *",
                 value=str(user.get("nama", "")),
                 disabled=True,
                 key="req_nama",
@@ -4387,6 +4716,15 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
                         placeholder="-- Pilih UOM --",
                         key=f"req_uom_{idx}",
                     )
+
+            preview = original_material_description({"brand": brand, "material_name": material_name, "part_number": part_number})
+            if all((brand.strip(), material_name.strip(), part_number.strip())):
+                problems = material_description_errors(preview)
+                if problems:
+                    st.caption(f"Preview Material Description: {preview} ({len(preview)} karakter). "
+                               "PIC Area akan melakukan koreksi apabila diperlukan.")
+                else:
+                    st.caption(f"Preview Material Description: {preview} ({len(preview)}/{DESCRIPTION_MAX_LENGTH} karakter).")
 
             items.append(
                 {
@@ -4632,20 +4970,20 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
     level = ROLE_LEVEL[role]
     role_meta = {
         ROLE_L1: (
-            "Modul Approval Admin Peralatan Area (L1)",
-            "Menampilkan permohonan baru yang membutuhkan persetujuan Admin Peralatan Area (L1).",
+            "Modul Approval PIC Area (L1)",
+            "Review awal material dan koreksi deskripsi apabila salah format atau lebih dari 40 karakter.",
         ),
         ROLE_L2: (
-            "Modul Approval Manper Area (L2)",
-            "Menampilkan permohonan yang telah disetujui L1 untuk verifikasi Manper Area (L2).",
+            "Modul Approval PIC Keuangan (L2)",
+            "Verifikasi atribut administrasi serta keuangan setelah persetujuan PIC Area.",
         ),
         ROLE_L3: (
-            "Modul Approval Manager Akuntansi (L3)",
-            "Menampilkan permohonan yang telah disetujui L2 untuk verifikasi Manager Akuntansi (L3).",
+            "Modul Approval PIC Persediaan (L3)",
+            "Verifikasi material dan koreksi ulang rekomendasi sebelumnya jika masih belum tepat.",
         ),
         ROLE_L4: (
-            "Modul Approval Manager Persediaan (L4)",
-            "Menampilkan permohonan yang telah disetujui L3 untuk verifikasi akhir Manager Persediaan (L4).",
+            "Modul Approval Manager Area (L4)",
+            "Persetujuan akhir dan penetapan deskripsi material final dari rekomendasi terakhir.",
         ),
     }
     role_title, role_desc = role_meta[role]
@@ -4662,7 +5000,7 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
 
     page_intro_banner(
         "Approval Workspace",
-        "Verifikasi berjenjang mulai dari Admin Peralatan Area (L1), Manper Area (L2), Manager Akuntansi (L3), hingga Manager Persediaan (L4). Keputusan berlaku per item material.",
+        "Alur: Site Pengaju → PIC Area (L1) → PIC Keuangan (L2) → PIC Persediaan (L3) → Manager Area (L4). Rekomendasi terbaru menjadi deskripsi final setelah L4 menyetujui.",
     )
     st.markdown(
         f'<div class="bima-role-hero"><div><span class="bima-role-eyebrow">WORKQUEUE {html.escape(level)}</span>'
@@ -4698,6 +5036,7 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
             | filtered["material_name"].astype(str).str.lower().str.contains(q, na=False)
             | filtered["part_number"].astype(str).str.lower().str.contains(q, na=False)
             | filtered["brand"].astype(str).str.lower().str.contains(q, na=False)
+            | filtered["material_description_current"].astype(str).str.lower().str.contains(q, na=False)
         ]
     if not filtered.empty and area != "Semua":
         filtered = filtered[filtered["area"].astype(str) == area]
@@ -4759,26 +5098,35 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
                 return
 
             recommendation = ""
-            material_reference = _approval_material_reference(item_row)
-            character_count = _approval_material_character_count(item_row)
-            needs_recommendation = role == ROLE_L1 and character_count > 40
-            if role == ROLE_L1:
-                if needs_recommendation:
-                    st.warning(
-                        f"Gabungan Brand; Nama Barang; Part Number berjumlah {character_count} karakter. "
-                        "Karena melebihi 40 karakter, Rekomendasi Nama Material wajib diisi sebelum Approve."
-                    )
-                    recommendation = st.text_input(
-                        "Rekomendasi Nama Material *",
-                        key=f"approval_recommendation_{selected_request}_{selected_item_no}",
-                        max_chars=40,
-                        placeholder="Maksimal 40 karakter",
-                    )
-                    st.caption(f"{len(recommendation)}/40 karakter")
+            current_description = latest_material_description(item_row)
+            current_problems = material_description_errors(current_description)
+            needs_recommendation = role in {ROLE_L1, ROLE_L3} and bool(current_problems)
+            if role in {ROLE_L1, ROLE_L3}:
+                if current_problems:
+                    st.warning("Deskripsi saat ini belum memenuhi standar: " + " ".join(current_problems))
                 else:
-                    st.success(
-                        f"Jumlah karakter {character_count} ≤ 40. Rekomendasi Nama Material tidak diperlukan."
-                    )
+                    st.success(f"Deskripsi saat ini sesuai format dan batas {DESCRIPTION_MAX_LENGTH} karakter.")
+                recommendation = st.text_input(
+                    "Rekomendasi Deskripsi Material" + (" *" if needs_recommendation else " (opsional)"),
+                    key=f"approval_recommendation_{selected_request}_{selected_item_no}",
+                    max_chars=DESCRIPTION_MAX_LENGTH,
+                    placeholder="BRAND; NAMA BARANG; PART NUMBER",
+                    help="Tepat dua titik koma; maksimal 40 karakter termasuk spasi/tanda baca. "
+                         "Rekomendasi L3 akan menggantikan rekomendasi L1 hanya jika L3 menyetujui.",
+                )
+                if recommendation.strip():
+                    rec_problems = material_description_errors(recommendation)
+                    if rec_problems:
+                        st.error(" ".join(rec_problems))
+                    else:
+                        st.caption(f"{len(recommendation.strip())}/{DESCRIPTION_MAX_LENGTH} karakter. Rekomendasi valid.")
+                else:
+                    st.caption(f"{len(recommendation)}/{DESCRIPTION_MAX_LENGTH} karakter. "
+                               "Kosongkan jika deskripsi saat ini sudah benar.")
+            elif role == ROLE_L4:
+                st.info("Deskripsi final yang akan disahkan: " + current_description)
+                if current_problems:
+                    st.error("Deskripsi belum valid; persetujuan final tidak dapat dilakukan.")
 
             note = st.text_area(
                 "Catatan Approver",
@@ -4790,7 +5138,10 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
 
             if "approval_processing" not in st.session_state:
                 st.session_state["approval_processing"] = False
-            approve_disabled = st.session_state["approval_processing"] or (needs_recommendation and not recommendation.strip())
+            approve_disabled = (st.session_state["approval_processing"]
+                                or (needs_recommendation and not recommendation.strip())
+                                or (bool(recommendation.strip()) and bool(material_description_errors(recommendation)))
+                                or (role == ROLE_L4 and bool(current_problems)))
             approve_clicked = st.button(
                 "Setujui (Approve)",
                 type="primary",
@@ -5070,6 +5421,7 @@ def render_documents_page(user: dict, request_service: RequestService, approval_
     pdf_header = dict(detail.header)
     pdf_header["status"] = aggregate_item_status(terminal_items)
     pdf_header["material_name"] = terminal_items.iloc[0].get("material_name", "")
+    pdf_header["material_description_final"] = final_material_description(terminal_items.iloc[0])
     pdf_detail = RequestDetail(header=pdf_header, items=terminal_items)
     pdf_history = history.copy()
 
@@ -5119,9 +5471,9 @@ def render_documents_page(user: dict, request_service: RequestService, approval_
                   <div><span>Nomor Request</span><strong>{html.escape(safe_text(h.get('request_id')))}</strong></div>
                   <div><span>ID Dokumen</span><strong>{html.escape(safe_text(verification.get('document_id')))}</strong></div>
                   <div><span>Versi</span><strong>V{html.escape(safe_text(verification.get('document_version')))}</strong></div>
-                  <div><span>Nama Material</span><strong>{html.escape(safe_text(h.get('material_name')))}</strong></div>
+                  <div><span>Deskripsi Material Final</span><strong>{html.escape(safe_text(final_material_description(h) or 'Lihat rincian item'))}</strong></div>
                   <div><span>Tanggal Pengajuan</span><strong>{html.escape(format_date_id(h.get('created_at')))}</strong></div>
-                  <div><span>Pemohon</span><strong>{html.escape(safe_text(h.get('nama_pemohon')))}</strong></div>
+                  <div><span>Site Pengaju</span><strong>{html.escape(_site_actor_name(h.get('site')))}</strong></div>
                   <div><span>Status</span>{status_badge_html(str(h.get('status','')))}</div>
                   <div><span>Verifikasi QR</span><strong style="color:#118959">ACTIVE</strong></div>
                 </div>
@@ -5163,7 +5515,7 @@ def render_profile_page(
                 f"""
                 <div class="profile-hero">
                   <div class="profile-avatar">{html.escape(initials(str(profile.get('nama') or profile.get('username') or 'U')))}</div>
-                  <div><h3>{html.escape(safe_text(profile.get('nama')))}</h3><p>{html.escape(safe_text(profile.get('role')))} · {html.escape(safe_text(profile.get('jabatan')))}</p></div>
+                  <div><h3>{html.escape(safe_text(profile.get('nama')))}</h3><p>{html.escape(role_title(user.get('role'), user.get('site')))}</p></div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -5242,7 +5594,7 @@ def _profile_kv(profile: dict) -> None:
     rows = [
         ("Email", profile.get("email")),
         ("Nomor HP", profile.get("no_hp")),
-        ("Jabatan", profile.get("jabatan")),
+        ("Jabatan / Peran Workflow", role_title(profile.get("role"), profile.get("site"))),
         ("Area", profile.get("area")),
         ("Site", profile.get("site")),
         ("Nomor Pegawai", profile.get("nomor_pegawai")),
@@ -5674,10 +6026,12 @@ def _set_authenticated_user(user: dict) -> None:
 
 
 def _current_user() -> dict:
-    return {
+    account = {
         key: st.session_state.get(key, "")
         for key in ["username", "nama", "role", "jabatan", "area", "site", "email", "no_hp", "nomor_pegawai"]
     }
+    # Also migrate still-valid browser cookies from old role assignments.
+    return _canonical_user(account)
 
 
 def _logout(user: dict) -> None:
@@ -5734,6 +6088,8 @@ def _render_app() -> None:
                 ensure_sheet_columns(SHEET_APPROVALS, APPROVAL_HEADERS)
             if SHEET_DOCUMENTS in existing_titles:
                 ensure_sheet_columns(SHEET_DOCUMENTS, DOCUMENT_HEADERS)
+            if SHEET_ACTIVITY in existing_titles:
+                ensure_sheet_columns(SHEET_ACTIVITY, ACTIVITY_HEADERS)
         st.session_state["worksheets_checked"] = True
 
     current_page = str(st.session_state.get("current_page", PAGE_DASHBOARD))
