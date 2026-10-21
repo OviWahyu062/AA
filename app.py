@@ -704,20 +704,25 @@ def is_approver(role: str) -> bool:
 
 
 def apply_request_scope(df: pd.DataFrame, role: str, username: str = "", area: str = "") -> pd.DataFrame:
-    """Apply practical visibility rules without changing approval semantics.
+    """Apply request visibility rules consistently across dashboard and documents.
 
-    Site Pengaju sees only its own submissions. Approvers can access their
-    role-based workqueues; request visibility for PIC Area and Manager Area
-    remains area-filtered when their account has an assigned area.
+    Site Pengaju sees only its own submissions. PIC Area (L1) remains scoped to
+    its assigned area. Manager Area (L4) follows the same organizational scope as
+    the L4 workqueue so approved/pending items cannot disappear from Dashboard
+    or Dokumen Approval because of an incomplete/mismatched Area value in the
+    account profile. L2/L3 are organizational roles as in the approval queue.
     """
     if df.empty:
         return df
     role = normalize_role(role)
     scoped = df.copy()
     if role == ROLE_USER and "username" in scoped.columns:
-        scoped = scoped[scoped["username"].astype(str).str.lower() == str(username).lower()]
-    elif role in {ROLE_L1, ROLE_L4} and area and "area" in scoped.columns:
-        scoped = scoped[scoped["area"].astype(str).str.lower() == str(area).lower()]
+        scoped = scoped[scoped["username"].astype(str).str.casefold() == str(username).casefold()]
+    elif role == ROLE_L1 and area and "area" in scoped.columns:
+        target_area = str(area).strip().casefold()
+        scoped = scoped[scoped["area"].astype(str).str.strip().str.casefold() == target_area]
+    # L2/L3/L4 intentionally keep organizational visibility. This matches the
+    # role-based approval workqueue and prevents L4 dashboard/document mismatch.
     return scoped
 
 
@@ -5450,6 +5455,12 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
                         recommended_material_name=recommendation,
                     )
                     st.session_state["approval_flash"] = f"{selected_request} Item #{selected_item_no} telah ditolak secara final."
+            # Force every page that depends on the approval decision to read the
+            # latest state immediately, especially Dashboard and Dokumen Approval.
+            clear_data_cache(SHEET_REQUESTS)
+            clear_data_cache(SHEET_APPROVALS)
+            clear_data_cache(SHEET_ACTIVITY)
+            clear_data_cache(SHEET_DOCUMENTS)
             st.session_state.pop("approval_selected_request", None)
             st.session_state.pop("approval_selected_item_no", None)
             st.rerun()
@@ -6946,6 +6957,156 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] { min-width:0
 """
 
 
+def _inject_glass_theme_css() -> None:
+    """Final UI layer: corporate liquid-glass theme plus reliable sidebar controls.
+
+    This is intentionally injected after the retained legacy/responsive styles so
+    old rules that hid Streamlit's collapsed sidebar control cannot win.
+    """
+    header_bg = image_to_data_uri(HEADER_PORT_BG)
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+          --glass-surface: rgba(255,255,255,.72);
+          --glass-surface-strong: rgba(255,255,255,.84);
+          --glass-border: rgba(255,255,255,.72);
+          --glass-edge: rgba(159,188,211,.44);
+          --glass-shadow: 0 18px 44px rgba(25,66,102,.11);
+          --glass-blur: blur(18px) saturate(128%);
+        }}
+
+        [data-testid="stAppViewContainer"] {{
+          background:
+            linear-gradient(125deg, rgba(239,246,251,.93) 0%, rgba(232,241,248,.86) 48%, rgba(219,233,243,.90) 100%),
+            url('{header_bg}') center top / cover fixed no-repeat !important;
+        }}
+        [data-testid="stMainBlockContainer"] {{position:relative !important;}}
+
+        /* Streamlit header is kept structurally alive so its native sidebar
+           open button remains usable after the sidebar is collapsed. */
+        [data-testid="stHeader"] {{
+          display:block !important; visibility:visible !important; opacity:1 !important;
+          height:0 !important; min-height:0 !important; background:transparent !important;
+          pointer-events:none !important; z-index:100000 !important;
+        }}
+        [data-testid="stHeader"] [data-testid="stToolbar"],
+        [data-testid="stHeader"] [data-testid="stDecoration"] {{display:none !important;}}
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {{
+          display:flex !important; visibility:visible !important; opacity:1 !important;
+          position:fixed !important; top:14px !important; left:14px !important;
+          width:40px !important; height:40px !important; padding:3px !important;
+          border:1px solid rgba(255,255,255,.82) !important; border-radius:13px !important;
+          background:rgba(246,250,253,.80) !important; backdrop-filter:blur(14px) saturate(135%) !important;
+          box-shadow:0 8px 24px rgba(22,65,101,.16) !important;
+          z-index:100100 !important; pointer-events:auto !important;
+        }}
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {{
+          display:flex !important; visibility:visible !important; pointer-events:auto !important;
+          width:100% !important; height:100% !important; color:#184d74 !important;
+          background:transparent !important; border:0 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
+        section[data-testid="stSidebar"] button[aria-label*="Collapse sidebar"],
+        section[data-testid="stSidebar"] button[aria-label*="Close sidebar"] {{
+          display:flex !important; visibility:visible !important; opacity:1 !important;
+          pointer-events:auto !important;
+        }}
+
+        section[data-testid="stSidebar"] {{
+          background:rgba(241,248,252,.66) !important;
+          border-right:1px solid rgba(255,255,255,.72) !important;
+          box-shadow:12px 0 34px rgba(23,61,94,.08) !important;
+        }}
+        section[data-testid="stSidebar"] > div:first-child {{
+          overflow-y:auto !important; overflow-x:hidden !important;
+          background:linear-gradient(180deg,rgba(248,252,255,.82),rgba(232,243,250,.68)) !important;
+          backdrop-filter:blur(22px) saturate(130%) !important;
+        }}
+        .enterprise-sidebar-profile,
+        .st-key-bima_mobile_menu {{
+          background:rgba(255,255,255,.58) !important;
+          border:1px solid rgba(255,255,255,.76) !important;
+          box-shadow:0 10px 28px rgba(24,70,108,.08) !important;
+          backdrop-filter:var(--glass-blur) !important;
+          border-radius:16px !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button {{border-radius:13px !important;}}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"] {{
+          background:rgba(255,255,255,.28) !important; border-color:transparent !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover {{
+          background:rgba(255,255,255,.68) !important; border-color:rgba(143,187,218,.38) !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {{
+          background:linear-gradient(135deg,rgba(0,102,179,.94),rgba(24,139,208,.90)) !important;
+          box-shadow:0 9px 22px rgba(0,102,179,.20) !important; border-color:rgba(255,255,255,.20) !important;
+        }}
+
+        div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{
+          background:rgba(246,250,253,.66) !important;
+          border-bottom:1px solid rgba(255,255,255,.72) !important;
+          backdrop-filter:blur(19px) saturate(130%) !important;
+          box-shadow:0 9px 28px rgba(29,72,107,.07) !important;
+        }}
+        .enterprise-responsive-header {{min-height:70px !important;}}
+
+        div[data-testid="stVerticalBlockBorderWrapper"],
+        .bima-metric-card, .bima-card, .ux-overview,
+        div[data-testid="stColumn"]:has(.bima-insight-shell-marker) {{
+          background:var(--glass-surface) !important;
+          border:1px solid var(--glass-border) !important;
+          box-shadow:var(--glass-shadow) !important;
+          backdrop-filter:var(--glass-blur) !important;
+          border-radius:18px !important;
+        }}
+        .bima-metric-card {{overflow:hidden !important;}}
+        .bima-metric-card::before {{height:3px !important; opacity:.88 !important;}}
+        .bima-metric-card::after {{background:rgba(255,255,255,.24) !important;}}
+        .bima-page-intro, .ux-overview-track, .enterprise-dashboard-date,
+        [data-testid="stExpander"] {{
+          background:rgba(255,255,255,.55) !important;
+          border-color:rgba(255,255,255,.74) !important;
+          backdrop-filter:blur(14px) saturate(125%) !important;
+          border-radius:16px !important;
+        }}
+        .bima-role-hero {{
+          background:linear-gradient(120deg,rgba(10,73,121,.86),rgba(0,112,184,.78)) !important;
+          border:1px solid rgba(255,255,255,.24) !important;
+          box-shadow:0 18px 38px rgba(7,72,118,.18) !important;
+          backdrop-filter:blur(16px) saturate(125%) !important;
+          border-radius:18px !important;
+        }}
+        [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+        [data-testid="stDateInput"] input, [data-testid="stSelectbox"] > div > div,
+        [data-testid="stTextArea"] textarea, [data-testid="stMultiSelect"] > div > div {{
+          background:rgba(255,255,255,.62) !important;
+          border:1px solid rgba(171,197,218,.48) !important;
+          box-shadow:inset 0 1px 0 rgba(255,255,255,.74) !important;
+          border-radius:13px !important;
+        }}
+        [data-testid="stButton"] button, [data-testid="stDownloadButton"] button,
+        [data-testid="stLinkButton"] a {{border-radius:13px !important;}}
+
+        @media (max-width:820px) {{
+          [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {{
+            top:12px !important; left:10px !important; width:38px !important; height:38px !important;
+          }}
+          div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{
+            background:rgba(247,251,254,.76) !important;
+          }}
+          div[data-testid="stVerticalBlockBorderWrapper"], .bima-metric-card, .bima-card {{
+            border-radius:15px !important;
+          }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _inject_theme_css() -> None:
     mode = st.session_state.get("theme_mode", "light")
     if mode == "dark":
@@ -6974,22 +7135,23 @@ def _render_login() -> None:
         <style>
           [data-testid="stSidebar"] {{ display:none !important; }}
           [data-testid="stMainBlockContainer"] {{ padding:0 !important; max-width:100% !important; margin:0 !important; }}
-          [data-testid="stAppViewContainer"] {{ background-image:linear-gradient(90deg,rgba(239,248,254,.18),rgba(244,250,254,.08)),url('{bg}') !important; background-size:cover !important; background-position:center center !important; background-repeat:no-repeat !important; min-height:100vh !important; }}
+          [data-testid="stAppViewContainer"] {{ background-image:linear-gradient(120deg,rgba(7,25,39,.38),rgba(21,69,101,.18),rgba(255,255,255,.04)),url('{bg}') !important; background-size:cover !important; background-position:center center !important; background-repeat:no-repeat !important; min-height:100vh !important; }}
           .login-logos {{ left:5vw !important; right:5vw !important; top:4.5vh !important; }}
           .login-logos img:first-child {{ width:126px !important; max-height:40px !important; }}
           .login-logos img:last-child {{ width:136px !important; max-height:43px !important; }}
-          .login-side-copy {{ left:5.2vw !important; top:43vh !important; font-size:10px !important; letter-spacing:.12em !important; color:#2B638F !important; }}
-          .login-footer-copy {{ left:5.2vw !important; bottom:4.2vh !important; font-size:9px !important; color:#638197 !important; }}
-          [data-testid="stForm"] {{ width:100% !important; max-width:390px !important; margin:0 auto !important; border:1px solid rgba(218,230,240,.96) !important; border-radius:12px !important; padding:24px 26px 20px !important; background:rgba(255,255,255,.965) !important; box-shadow:0 16px 38px rgba(34,78,111,.14) !important; backdrop-filter:blur(4px) !important; }}
+          .login-side-copy {{ left:5.2vw !important; top:43vh !important; font-size:10px !important; letter-spacing:.12em !important; color:rgba(255,255,255,.78) !important; text-shadow:0 1px 12px rgba(0,0,0,.25) !important; }}
+          .login-footer-copy {{ left:5.2vw !important; bottom:4.2vh !important; font-size:9px !important; color:rgba(255,255,255,.68) !important; text-shadow:0 1px 10px rgba(0,0,0,.22) !important; }}
+          [data-testid="stForm"] {{ width:100% !important; max-width:410px !important; margin:0 auto !important; border:1px solid rgba(255,255,255,.34) !important; border-radius:28px !important; padding:28px 28px 23px !important; background:linear-gradient(145deg,rgba(16,40,57,.52),rgba(255,255,255,.13)) !important; box-shadow:0 28px 70px rgba(4,18,30,.30), inset 0 1px 0 rgba(255,255,255,.30) !important; backdrop-filter:blur(22px) saturate(135%) !important; -webkit-backdrop-filter:blur(22px) saturate(135%) !important; }}
           .login-card-title {{ margin-bottom:16px !important; }}
-          .login-card-title .eyebrow {{ font-size:10px !important; color:#8191A0 !important; letter-spacing:.09em !important; }}
-          .login-card-title h1 {{ font-size:22px !important; line-height:1.15 !important; color:#173D5B !important; margin:6px 0 2px !important; }}
-          .login-card-title strong {{ font-size:14px !important; color:#0066B3 !important; }}
-          .login-card-title p {{ max-width:315px !important; margin:8px auto 0 !important; font-size:10.5px !important; line-height:1.45 !important; color:#8495A5 !important; }}
-          [data-testid="stForm"] label p {{ font-size:11.5px !important; font-weight:600 !important; color:#314F67 !important; }}
-          [data-testid="stForm"] input {{ min-height:40px !important; border:1px solid #D9E2EC !important; border-radius:6px !important; font-size:12px !important; box-shadow:none !important; }}
-          [data-testid="stFormSubmitButton"] button {{ min-height:40px !important; border-radius:6px !important; background:#0066B3 !important; border-color:#0066B3 !important; font-size:12px !important; font-weight:650 !important; box-shadow:none !important; }}
-          .login-corporate-note {{ margin-top:13px !important; padding-top:11px !important; font-size:9.5px !important; color:#8D9AA7 !important; }}
+          .login-card-title .eyebrow {{ font-size:10px !important; color:rgba(244,249,253,.76) !important; letter-spacing:.11em !important; }}
+          .login-card-title h1 {{ font-size:27px !important; line-height:1.15 !important; color:#FFFFFF !important; margin:7px 0 3px !important; font-weight:650 !important; letter-spacing:-.02em !important; }}
+          .login-card-title strong {{ font-size:14px !important; color:#BDE7FF !important; }}
+          .login-card-title p {{ max-width:315px !important; margin:9px auto 0 !important; font-size:11px !important; line-height:1.5 !important; color:rgba(244,249,253,.82) !important; }}
+          [data-testid="stForm"] label p {{ font-size:11.5px !important; font-weight:600 !important; color:rgba(255,255,255,.88) !important; }}
+          [data-testid="stForm"] input {{ min-height:46px !important; border:1px solid rgba(255,255,255,.24) !important; border-radius:13px !important; font-size:13px !important; color:#FFFFFF !important; background:rgba(255,255,255,.17) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.12) !important; }}
+          [data-testid="stForm"] input::placeholder {{ color:rgba(245,250,253,.66) !important; }}
+          [data-testid="stFormSubmitButton"] button {{ min-height:46px !important; border-radius:999px !important; background:linear-gradient(135deg,rgba(0,102,179,.92),rgba(29,147,214,.86)) !important; border:1px solid rgba(255,255,255,.30) !important; color:#FFFFFF !important; font-size:12px !important; font-weight:680 !important; box-shadow:0 12px 26px rgba(0,58,100,.24), inset 0 1px 0 rgba(255,255,255,.20) !important; }}
+          .login-corporate-note {{ margin-top:14px !important; padding-top:12px !important; border-top:1px solid rgba(255,255,255,.20) !important; font-size:9.5px !important; color:rgba(244,249,253,.68) !important; }}
           @media (max-width:820px) {{
             .login-side-copy,.login-footer-copy {{display:none !important;}}
             .login-logos {{left:10px !important; right:10px !important; top:3vh !important;
@@ -7087,6 +7249,7 @@ def _render_app() -> None:
     _inject_usability_css()
     _inject_enterprise_css()
     _inject_responsive_css()
+    _inject_glass_theme_css()
     user = _current_user()
     # Existing sessions and cookies may store older role labels. The account
     # is re-normalized each render; refuse an unknown level instead of showing
