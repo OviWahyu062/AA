@@ -3817,11 +3817,6 @@ def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -
             '</div>',
             unsafe_allow_html=True,
         )
-        if st.button('Sembunyikan menu', icon=':material/left_panel_close:',
-                     key='sidebar_hide_control', use_container_width=True):
-            st.session_state['sidebar_hidden'] = True
-            st.rerun()
-
         st.markdown(
             f'<div class="enterprise-sidebar-profile">'
             f'<div class="enterprise-avatar">{html.escape(initials(display_name))}</div>'
@@ -5946,7 +5941,7 @@ st.set_page_config(
     page_icon=str(PELINDO_BIMA_LOGO),
     layout="wide",
     # Streamlit chooses overlay sidebar on mobile and a persistent panel on desktop.
-    initial_sidebar_state="auto",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -7148,7 +7143,9 @@ def _inject_liquid_glass_v2_css() -> None:
         }}
         [data-testid="stMainBlockContainer"] {{max-width:1480px !important;padding:18px 26px 42px !important;}}
 
-        [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {{display:none !important;}}
+        [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {{
+          display:flex !important; visibility:visible !important; opacity:1 !important;
+        }}
         .st-key-sidebar_show_control {{position:fixed !important;top:15px !important;left:15px !important;z-index:100500 !important;width:auto !important;}}
         .st-key-sidebar_show_control button {{
           min-height:42px !important;padding:0 15px !important;border-radius:14px !important;color:#fff !important;
@@ -7300,6 +7297,89 @@ def _inject_theme_css() -> None:
         """, unsafe_allow_html=True)
 
 
+
+def _inject_sidebar_visibility_fix_css() -> None:
+    """Final sidebar control override. Keeps the sidebar visible on load and allows native hide/show."""
+    st.markdown(
+        """
+        <style>
+        /* Sidebar itself must never be rendered as an empty reserved column. */
+        section[data-testid="stSidebar"] {
+          display:block !important;
+          visibility:visible !important;
+          opacity:1 !important;
+        }
+        section[data-testid="stSidebar"] > div:first-child {
+          visibility:visible !important;
+          opacity:1 !important;
+          overflow-y:auto !important;
+        }
+
+        /* Restore Streamlit native collapse button inside an expanded sidebar. */
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
+        section[data-testid="stSidebar"] button[aria-label*="Collapse sidebar"],
+        section[data-testid="stSidebar"] button[aria-label*="Close sidebar"] {
+          display:flex !important;
+          visibility:visible !important;
+          opacity:1 !important;
+          pointer-events:auto !important;
+          position:relative !important;
+          z-index:100500 !important;
+        }
+
+        /* Restore the reopen control after the sidebar has been collapsed. */
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {
+          display:flex !important;
+          visibility:visible !important;
+          opacity:1 !important;
+          pointer-events:auto !important;
+          position:fixed !important;
+          top:14px !important;
+          left:14px !important;
+          width:42px !important;
+          height:42px !important;
+          z-index:100600 !important;
+          border-radius:13px !important;
+          background:rgba(31,42,54,.88) !important;
+          border:1px solid rgba(255,255,255,.22) !important;
+          box-shadow:0 10px 28px rgba(0,0,0,.25) !important;
+          backdrop-filter:blur(16px) !important;
+        }
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {
+          display:flex !important;
+          visibility:visible !important;
+          opacity:1 !important;
+          pointer-events:auto !important;
+          color:#FFFFFF !important;
+        }
+
+        /* Older theme rules set the header to hidden. Keep its frame transparent while
+           allowing Streamlit's sidebar controls to remain interactive. */
+        [data-testid="stHeader"] {
+          visibility:visible !important;
+          display:block !important;
+          height:0 !important;
+          min-height:0 !important;
+          background:transparent !important;
+          pointer-events:none !important;
+          z-index:100550 !important;
+        }
+        [data-testid="stHeader"] button,
+        [data-testid="stHeader"] [data-testid="stSidebarCollapsedControl"] {
+          pointer-events:auto !important;
+        }
+        [data-testid="stHeader"] [data-testid="stToolbar"],
+        [data-testid="stHeader"] [data-testid="stDecoration"] {
+          display:none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_login() -> None:
     bg = image_to_data_uri(LOGIN_BG)
     danantara = image_to_data_uri(DANANTARA_LOGO)
@@ -7321,9 +7401,9 @@ def _render_login() -> None:
           .login-card-title h1 {{ font-size:27px !important; line-height:1.15 !important; color:#FFFFFF !important; margin:7px 0 3px !important; font-weight:650 !important; letter-spacing:-.02em !important; }}
           .login-card-title strong {{ font-size:14px !important; color:#BDE7FF !important; }}
           .login-card-title p {{ max-width:315px !important; margin:9px auto 0 !important; font-size:11px !important; line-height:1.5 !important; color:rgba(244,249,253,.82) !important; }}
-          [data-testid="stForm"] label p {{ font-size:11.5px !important; font-weight:600 !important; color:rgba(255,255,255,.88) !important; }}
-          [data-testid="stForm"] input {{ min-height:46px !important; border:1px solid rgba(255,255,255,.24) !important; border-radius:13px !important; font-size:13px !important; color:#FFFFFF !important; background:rgba(255,255,255,.17) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.12) !important; }}
-          [data-testid="stForm"] input::placeholder {{ color:rgba(245,250,253,.66) !important; }}
+          [data-testid="stForm"] label p {{ font-size:11.5px !important; font-weight:650 !important; color:#111111 !important; text-shadow:none !important; }}
+          [data-testid="stForm"] input {{ min-height:46px !important; border:1px solid rgba(255,255,255,.42) !important; border-radius:13px !important; font-size:13px !important; color:#111111 !important; -webkit-text-fill-color:#111111 !important; caret-color:#111111 !important; background:rgba(255,255,255,.56) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.34) !important; }}
+          [data-testid="stForm"] input::placeholder {{ color:rgba(17,17,17,.62) !important; opacity:1 !important; }}
           [data-testid="stFormSubmitButton"] button {{ min-height:46px !important; border-radius:999px !important; background:linear-gradient(135deg,rgba(0,102,179,.92),rgba(29,147,214,.86)) !important; border:1px solid rgba(255,255,255,.30) !important; color:#FFFFFF !important; font-size:12px !important; font-weight:680 !important; box-shadow:0 12px 26px rgba(0,58,100,.24), inset 0 1px 0 rgba(255,255,255,.20) !important; }}
           .login-corporate-note {{ margin-top:14px !important; padding-top:12px !important; border-top:1px solid rgba(255,255,255,.20) !important; font-size:9.5px !important; color:rgba(244,249,253,.68) !important; }}
           @media (max-width:820px) {{
@@ -7425,6 +7505,7 @@ def _render_app() -> None:
     _inject_responsive_css()
     _inject_glass_theme_css()
     _inject_liquid_glass_v2_css()
+    _inject_sidebar_visibility_fix_css()
     user = _current_user()
     # Existing sessions and cookies may store older role labels. The account
     # is re-normalized each render; refuse an unknown level instead of showing
@@ -7492,14 +7573,10 @@ def _render_app() -> None:
     except Exception:
         notification_count = 0
 
-    sidebar_hidden = bool(st.session_state.get("sidebar_hidden", False))
-    if sidebar_hidden:
-        if st.button('Menu', icon=':material/menu:', key='sidebar_show_control'):
-            st.session_state['sidebar_hidden'] = False
-            st.rerun()
-        new_page = current_page
-    else:
-        new_page = render_sidebar(user, current_page, notification_count)
+    # Always render the sidebar. Streamlit's native collapse/expand control is used
+    # so the menu cannot become an empty reserved panel because of stale session state.
+    st.session_state['sidebar_hidden'] = False
+    new_page = render_sidebar(user, current_page, notification_count)
 
     if new_page != current_page:
         if page_allowed(str(user.get("role", "")), new_page):
