@@ -634,6 +634,9 @@ ROLE_ALIASES = {
     "manager persediaan": ROLE_L3,
     "l3": ROLE_L3,
     "approver l4": ROLE_L4,
+    "approval l4": ROLE_L4,
+    "approval level 4": ROLE_L4,
+    "approver level 4": ROLE_L4,
     "manager area": ROLE_L4,
     "manper area": ROLE_L4,
     "manager peralatan area": ROLE_L4,
@@ -650,10 +653,36 @@ ROLE_MENU = {
 
 
 def normalize_role(raw_role: str | None) -> str:
-    key = " ".join(str(raw_role or "").strip().lower().replace("/", " ").split())
+    """Normalize trusted Google Sheets role labels into stable workflow permissions.
+
+    Legacy accounts may contain a display role such as
+    "Approval L4 (Manager Persediaan)". The explicit approval level is the
+    authorization source; the historical job title in parentheses is not.
+    Unrecognized or contradictory labels are deliberately NOT granted access.
+    """
+    key = " ".join(
+        str(raw_role or "").strip().lower()
+        .replace("/", " ").replace("_", " ").replace("-", " ").split()
+    )
     if key in ROLE_ALIASES:
         return ROLE_ALIASES[key]
-    # Longest aliases first, so "Manager Peralatan Area" is not caught as "Manager Area".
+
+    # Handle "Approval L4 (Manager Persediaan)", "Approval Level 4", and
+    # "Manager Area (Approver L4)" before legacy titles such as Manager
+    # Persediaan, which now belongs to L3.
+    recognized_levels = set(re.findall(
+        r"(?<![a-z0-9])(?:approver|approval)(?:\s+level)?\s+l?\s*([1-4])\b"
+        r"|(?<![a-z0-9])level\s+l?\s*([1-4])\b",
+        key,
+    ))
+    level_numbers = {int(part) for match in recognized_levels for part in match if part}
+    if len(level_numbers) == 1:
+        number = next(iter(level_numbers))
+        return LEVEL_ROLE[f"L{number}"]
+    if len(level_numbers) > 1:
+        return str(raw_role or "").strip()
+
+    # Longest aliases first: "Manager Peralatan Area" before "Manager Area".
     for alias, role in sorted(ROLE_ALIASES.items(), key=lambda pair: len(pair[0]), reverse=True):
         if alias and (key.startswith(alias + " ") or key.endswith(" " + alias)):
             return role
@@ -1535,14 +1564,10 @@ USER_ALIASES = {
 
 def _canonical_user(record: dict[str, Any]) -> dict[str, str]:
     user = {key: str(first_nonempty(record, aliases, "")).strip() for key, aliases in USER_ALIASES.items()}
-    raw_role = user["role"]
-    # Old account sheets often store only "Approver L2/L3/L4" in role and the
-    # actual previous job title in jabatan. Prefer that title when migrating.
-    if re.fullmatch(r"(?:approver\s*)?l[1-4]", raw_role.strip(), re.IGNORECASE):
-        title_role = normalize_role(user.get("jabatan", ""))
-        user["role"] = title_role if title_role in APPROVER_ROLES else normalize_role(raw_role)
-    else:
-        user["role"] = normalize_role(raw_role)
+    # IMPORTANT: explicit approval level is authoritative. Do not replace an
+    # L4 approval assignment with L3 merely because the legacy job-title field
+    # says "Manager Persediaan". The jabatan field is informational only.
+    user["role"] = normalize_role(user["role"])
     return user
 
 
@@ -1573,6 +1598,13 @@ def authenticate(username: str, password: str) -> dict[str, str] | None:
             return None
         if not user["role"]:
             raise SheetsServiceError("Role pengguna belum diatur pada Google Sheets.")
+        if user["role"] not in ALL_ROLES:
+            raise SheetsServiceError(
+                "Role akun pada Google Sheets belum dikenali. "
+                "Periksa kolom Role pada Data Username + Password. "
+                "Gunakan Site, PIC Area, PIC Keuangan, PIC Persediaan, atau Manager Area "
+                "(Approver L1, L2, L3, atau L4)."
+            )
         return user
     return None
 
@@ -3708,6 +3740,7 @@ def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -
         with st.popover('Pengaturan akun', use_container_width=True):
             st.markdown(f'**{html.escape(display_name)}**')
             st.caption(role_name)
+            st.caption('Versi 2026.10.21-R2 | Perbaikan akses L4')
             if user.get('email'):
                 st.caption(str(user['email']))
             if user.get('site'):
@@ -6930,6 +6963,16 @@ def _render_app() -> None:
     _inject_enterprise_css()
     _inject_responsive_css()
     user = _current_user()
+    # Existing sessions and cookies may store older role labels. The account
+    # is re-normalized each render; refuse an unknown level instead of showing
+    # only Dashboard/Profile and silently hiding the approval queue.
+    if user.get("role") not in ALL_ROLES:
+        st.error("Role akun belum dikenali, sehingga menu approval tidak dapat ditampilkan.")
+        st.info(
+            "Periksa nilai kolom Role di Google Sheets. Untuk Manager Area "
+            "gunakan 'Approver L4' atau 'Manager Area', lalu login kembali."
+        )
+        st.stop()
     request_service = RequestService()
     approval_service = ApprovalService(request_service)
     profile_service = ProfileService()
