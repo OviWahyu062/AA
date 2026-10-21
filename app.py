@@ -3995,8 +3995,10 @@ def render_approval_item_table(df: pd.DataFrame, key_prefix: str, role: str) -> 
         rid = str(row.get('request_id', ''))
         number = row.get('item_no', '')
         description = original_material_description(row) if role == ROLE_L1 else latest_material_description(row)
-        errors = material_description_errors(description) if role in (ROLE_L1, ROLE_L3) else []
-        if role == ROLE_L1:
+        # L4 shares the same review-card structure and format indicator as L1.
+        # Its description comes from the latest approved L1/L3 recommendation.
+        errors = material_description_errors(description) if role in (ROLE_L1, ROLE_L3, ROLE_L4) else []
+        if role in (ROLE_L1, ROLE_L4):
             facts = [('Plant', _approval_site_plant(row))]
         elif role == ROLE_L2:
             facts = [('Profit Center', row.get('profit_center')), ('Valuation Class', row.get('valuation_class'))]
@@ -4024,9 +4026,10 @@ def render_approval_item_table(df: pd.DataFrame, key_prefix: str, role: str) -> 
                 )
             with c_state:
                 st.markdown(status_badge_html(str(row.get('status', ''))), unsafe_allow_html=True)
-                if role in (ROLE_L1, ROLE_L3):
+                if role in (ROLE_L1, ROLE_L3, ROLE_L4):
                     cls = 'ux-check-bad' if errors else 'ux-check-good'
-                    caption = 'Perlu koreksi' if errors else 'Format sesuai'
+                    caption = ('Perlu koreksi' if errors else
+                               'Siap disahkan' if role == ROLE_L4 else 'Format sesuai')
                     st.markdown(
                         f'<div class="{cls}">{caption} · {len(description)}/{DESCRIPTION_MAX_LENGTH}</div>',
                         unsafe_allow_html=True,
@@ -4047,6 +4050,11 @@ def render_approval_review_information(role: str, item_row: dict[str, Any], hist
     st.markdown(_ui_material_comparison(original, current, final_material_description(item_row)),
                 unsafe_allow_html=True)
     st.caption(f'Rekomendasi terakhir: {source} · {len(current)}/{DESCRIPTION_MAX_LENGTH} karakter')
+    # Identical per-item progress presentation at L1 and L4 (also shown at L2/L3).
+    st.markdown(
+        workflow_progress_html(item_row.get('status', ''), history, item_row.get('site', '')),
+        unsafe_allow_html=True,
+    )
     rows = [
         ("ID Request", request_id),
         ("Site Pengaju", _site_actor_name(item_row.get("site"))),
@@ -4062,12 +4070,16 @@ def render_approval_review_information(role: str, item_row: dict[str, Any], hist
                  ("Material Type", item_row.get("material_type")),
                  ("Merk / Brand", item_row.get("brand")),
                  ("Part Number", item_row.get("part_number"))]
-    elif role == ROLE_L4:
-        rows += [("Profit Center", item_row.get("profit_center")),
-                 ("Valuation Class", item_row.get("valuation_class")),
-                 ("Material Type", item_row.get("material_type")),
-                 ("Material Group", item_row.get("material_group"))]
+    # L4 keeps the same concise primary details as PIC Area (L1).
     _kv(rows)
+    if role == ROLE_L4:
+        with st.expander("Atribut pelengkap untuk persetujuan final", expanded=False):
+            _kv([
+                ("Profit Center", item_row.get("profit_center")),
+                ("Valuation Class", item_row.get("valuation_class")),
+                ("Material Type", item_row.get("material_type")),
+                ("Material Group", item_row.get("material_group")),
+            ])
 
     if history is not None and not history.empty:
         st.markdown("**Jejak Koreksi Deskripsi Material**")
@@ -5099,7 +5111,8 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
         ),
         ROLE_L4: (
             "Modul Approval Manager Area (L4)",
-            "Persetujuan akhir dan penetapan deskripsi material final dari rekomendasi terakhir.",
+            "Review akhir material dengan tampilan PIC Area, validasi standar 40 karakter, "
+            "dan pengesahan rekomendasi terakhir sebagai deskripsi final.",
         ),
     }
     role_title, role_desc = role_meta[role]
@@ -5218,11 +5231,12 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
             current_description = latest_material_description(item_row)
             current_problems = material_description_errors(current_description)
             needs_recommendation = role in {ROLE_L1, ROLE_L3} and bool(current_problems)
+            # Common format feedback for both PIC Area and Manager Area.
+            if current_problems:
+                st.warning("Deskripsi saat ini belum memenuhi standar: " + " ".join(current_problems))
+            else:
+                st.success(f"Deskripsi saat ini sesuai format dan batas {DESCRIPTION_MAX_LENGTH} karakter.")
             if role in {ROLE_L1, ROLE_L3}:
-                if current_problems:
-                    st.warning("Deskripsi saat ini belum memenuhi standar: " + " ".join(current_problems))
-                else:
-                    st.success(f"Deskripsi saat ini sesuai format dan batas {DESCRIPTION_MAX_LENGTH} karakter.")
                 recommendation = st.text_input(
                     "Rekomendasi Deskripsi Material" + (" *" if needs_recommendation else " (opsional)"),
                     key=f"approval_recommendation_{selected_request}_{selected_item_no}",
@@ -5241,9 +5255,26 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
                     st.caption(f"{len(recommendation)}/{DESCRIPTION_MAX_LENGTH} karakter. "
                                "Kosongkan jika deskripsi saat ini sudah benar.")
             elif role == ROLE_L4:
-                st.info("Deskripsi final yang akan disahkan: " + current_description)
+                # Same review-field placement as PIC Area, but deliberately read-only.
+                # L4 confirms the latest L1/L3 approved recommendation rather than
+                # overwriting the recommendation stored in Google Sheets.
+                st.text_input(
+                    "Rekomendasi Terakhir untuk Deskripsi Final",
+                    value=current_description,
+                    disabled=True,
+                    help="Diambil dari rekomendasi terakhir yang sudah disetujui PIC Area (L1) "
+                         "atau PIC Persediaan (L3). Manager Area mengesahkan, bukan mengubahnya.",
+                )
+                source_level = str(item_row.get('last_recommended_level', '') or '').strip().upper()
+                source = (history_level_title(source_level)
+                          if source_level in LEVEL_ROLE else _site_actor_name(item_row.get('site')))
+                st.caption(
+                    f"Sumber: {source} · {len(current_description)}/{DESCRIPTION_MAX_LENGTH} karakter. "
+                    "Deskripsi di atas akan menjadi Material Description Final setelah disetujui."
+                )
                 if current_problems:
-                    st.error("Deskripsi belum valid; persetujuan final tidak dapat dilakukan.")
+                    st.error("Deskripsi belum valid; persetujuan final tidak dapat dilakukan. "
+                             "Tolak item dengan alasan koreksi yang diperlukan.")
 
             note = st.text_area(
                 "Catatan Approver",
@@ -6523,6 +6554,15 @@ def _inject_responsive_css() -> None:
 
 _RESPONSIVE_CSS = r"""
 /* MASTER MATERIAL - RESPONSIVE UI: desktop, tablet, phone (2026-10) */
+/* Manager Area sees the final recommendation in a read-only input. Keep it legible. */
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.bima-approval-panel-marker)
+  [data-testid="stTextInput"] input:disabled {
+  opacity:1 !important;
+  -webkit-text-fill-color:#1c416f !important;
+  color:#1c416f !important;
+  background:#f2f7fd !important;
+  cursor:default !important;
+}
 html, body { max-width:100%; overflow-x:clip; }
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"], [data-testid="stMainBlockContainer"] { min-width:0 !important; max-width:100%; }
