@@ -2449,21 +2449,9 @@ class ApprovalService:
         if not changed:
             raise SheetsServiceError("Item tidak ditemukan saat memperbarui status.")
 
-        if next_status == STATUS_APPROVED_FINAL and worksheet_exists(SHEET_DOCUMENTS):
-            upsert_dict(
-                SHEET_DOCUMENTS,
-                "request_id",
-                request_id,
-                {
-                    "request_id": request_id,
-                    "document_status": "READY",
-                    "approved_at": timestamp,
-                    "approved_by": user.get("nama", ""),
-                    "last_generated_at": "",
-                    "last_generated_by": "",
-                    "file_url": "",
-                },
-            )
+        # Dokumen Keputusan per Item akan diterbitkan ketika pengguna membuka
+        # menu Dokumen Approval. Record QR disimpan menurut scope request/item,
+        # bukan ditandai sebagai dokumen gabungan sebelum semua item selesai.
 
         self.requests.upsert_activity(request_id, fresh=True)
         log_event(
@@ -2603,6 +2591,80 @@ def upload_file(data: bytes, filename: str, mime_type: str = "application/octet-
 
 
 # ============================== services/document_verification.py ==============================
+# Item decisions can be published independently of the other items in a request.
+# The verifier uses a separate key for every item so QR tokens never overwrite
+# the existing request-level verification record.
+DOCUMENT_ITEM_KEY_MARKER = "::ITEM::"
+
+
+def document_scope_key(request_id: Any, item_no: Any | None = None) -> str:
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        raise ValueError("Request ID untuk dokumen belum tersedia.")
+    if item_no is None or not str(item_no).strip():
+        return request_id
+    return f"{request_id}{DOCUMENT_ITEM_KEY_MARKER}{str(item_no).strip()}"
+
+
+def split_document_scope_key(document_key: Any) -> tuple[str, str | None]:
+    value = str(document_key or "").strip()
+    if DOCUMENT_ITEM_KEY_MARKER not in value:
+        return value, None
+    request_id, item_no = value.rsplit(DOCUMENT_ITEM_KEY_MARKER, 1)
+    return request_id.strip(), item_no.strip() or None
+
+
+def available_document_entries(items: pd.DataFrame) -> list[dict[str, str]]:
+    """List finalized item decisions, plus consolidated documents for fully final requests.
+
+    Always determine eligibility from *item* statuses, not the aggregate request
+    status. One Approved Final item may coexist with other Pending L1-L4 items.
+    """
+    if items is None or items.empty or not {"request_id", "status", "item_no"}.issubset(items.columns):
+        return []
+    rows = items.copy()
+    rows["_document_status"] = rows["status"].map(canonical_status)
+    closed_statuses = {STATUS_APPROVED_FINAL, STATUS_REJECTED}
+    result: list[dict[str, str]] = []
+    for request_id, group in rows.groupby("request_id", sort=False):
+        rid = str(request_id).strip()
+        if not rid:
+            continue
+        decided = group[group["_document_status"].isin(closed_statuses)]
+        if decided.empty:
+            continue
+        all_closed = len(decided) == len(group)
+        latest_action = str(group.get("last_action_at", pd.Series(dtype=str)).fillna("").max() or "")
+        # One-item requests get a single request-level PDF for backward compatibility.
+        if all_closed:
+            result.append({
+                "key": document_scope_key(rid), "request_id": rid,
+                "item_no": "", "scope": "request",
+                "label": f"{rid} | Dokumen gabungan ({len(group)} item)",
+                "material": str(group.iloc[0].get("material_name", "")),
+                "status": aggregate_item_status(group),
+                "sort_at": latest_action,
+            })
+        # For multi-item requests, each closed line has its own immediately
+        # accessible final decision, including when other lines are pending.
+        if len(group) > 1 or not all_closed:
+            for _, row in decided.iterrows():
+                item_no = str(row.get("item_no", "")).strip()
+                if not item_no:
+                    continue
+                decision = row["_document_status"]
+                caption = "Approved Final" if decision == STATUS_APPROVED_FINAL else "Rejected"
+                result.append({
+                    "key": document_scope_key(rid, item_no), "request_id": rid,
+                    "item_no": item_no, "scope": "item",
+                    "label": f"{rid} | Item {item_no} | {caption}",
+                    "material": str(row.get("material_name", "")),
+                    "status": decision,
+                    "sort_at": str(row.get("last_action_at", "") or ""),
+                })
+    return sorted(result, key=lambda entry: (entry["sort_at"], entry["request_id"], entry["item_no"]), reverse=True)
+
+
 DOCUMENT_VERIFICATION_COLUMNS = [
     "document_id",
     "document_version",
@@ -2751,7 +2813,7 @@ def _qr_png_bytes(data: str, box_size: int = 7, border: int = 2) -> bytes:
     return buffer.getvalue()
 
 
-def prepare_document_verification(detail: Any, history: pd.DataFrame, generated_by: str = "") -> dict[str, Any]:
+def prepare_document_verification(detail: Any, history: pd.DataFrame, generated_by: str = "", document_key: str | None = None) -> dict[str, Any]:
     """Create or reuse the active verification identity for a request document.
 
     A version is incremented only when the signed document content changes. The
@@ -2764,11 +2826,19 @@ def prepare_document_verification(detail: Any, history: pd.DataFrame, generated_
     if not request_id:
         raise PDFGenerationError("Nomor request tidak tersedia untuk verifikasi dokumen.")
 
+    verification_key = document_key or request_id
+    scope_request_id, scope_item_no = split_document_scope_key(verification_key)
+    if scope_request_id != request_id:
+        raise PDFGenerationError("Identitas verifikasi tidak sesuai dengan nomor request.")
+    if scope_item_no is not None:
+        if len(detail.items) != 1 or str(detail.items.iloc[0].get("item_no", "")).strip() != scope_item_no:
+            raise PDFGenerationError("Dokumen item tidak sesuai dengan item yang diverifikasi.")
+
     fingerprint = _document_fingerprint(detail, history)
     records = read_records(SHEET_DOCUMENTS)
     current: dict[str, Any] = {}
     for row in records:
-        if _clean_for_signature(row.get("request_id")) == request_id:
+        if _clean_for_signature(row.get("request_id")) == verification_key:
             current = row
             break
 
@@ -2779,14 +2849,15 @@ def prepare_document_verification(detail: Any, history: pd.DataFrame, generated_
         current_version = 0
     content_changed = not current_fp or current_fp != fingerprint
     version = max(1, current_version + 1 if content_changed else current_version or 1)
-    token = _verification_token(request_id, version, fingerprint)
+    token = _verification_token(verification_key, version, fingerprint)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    document_id = f"DOC-{request_id}-V{version}"
+    printable_id = verification_key.replace(DOCUMENT_ITEM_KEY_MARKER, "-ITEM-")
+    document_id = f"DOC-{printable_id}-V{version}"
     issued_at = iso_now() if content_changed or not _clean_for_signature(current.get("issued_at")) else _clean_for_signature(current.get("issued_at"))
     status = "ACTIVE"
 
     expected = {
-        "request_id": request_id,
+        "request_id": verification_key,
         "document_id": document_id,
         "document_version": version,
         "document_status": "READY",
@@ -2803,11 +2874,12 @@ def prepare_document_verification(detail: Any, history: pd.DataFrame, generated_
         if k not in {"last_generated_at", "last_generated_by"}
     )
     if must_write:
-        upsert_dict(SHEET_DOCUMENTS, "request_id", request_id, expected)
+        upsert_dict(SHEET_DOCUMENTS, "request_id", verification_key, expected)
 
-    url = _verification_url(request_id, version, token)
+    url = _verification_url(verification_key, version, token)
     return {
         "request_id": request_id,
+        "document_key": verification_key,
         "document_id": document_id,
         "document_version": version,
         "verification_status": status,
@@ -2897,17 +2969,24 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
         try:
             service = RequestService()
             approval_service = ApprovalService(service)
-            detail = service.get_request(request_id)
-            history = approval_service.get_history(request_id)
+            true_request_id, verified_item_no = split_document_scope_key(request_id)
+            detail = service.get_request(true_request_id)
+            history = approval_service.get_history(true_request_id, item_no=verified_item_no)
             if detail:
                 h = detail.header
                 item_statuses = detail.items.get("status", pd.Series(dtype=str)).map(canonical_status) if not detail.items.empty else pd.Series(dtype=str)
                 final_items = detail.items[item_statuses.isin([STATUS_APPROVED_FINAL, STATUS_REJECTED])].copy() if not detail.items.empty else pd.DataFrame()
+                if verified_item_no is not None:
+                    final_items = final_items[final_items["item_no"].astype(str).str.strip() == verified_item_no].copy()
+                    if final_items.empty:
+                        valid = False
+                        message = "Item ini tidak lagi memiliki keputusan final yang dapat diverifikasi."
                 submitted_time = safe_text(h.get("submitted_at"))
                 if submitted_time == "-":
                     submitted_time = safe_text(h.get("created_at"))
                 details = [
-                    ("Nomor Request", request_id),
+                    ("Nomor Request", true_request_id),
+                    ("Cakupan", f"Item {verified_item_no}" if verified_item_no is not None else "Seluruh item pada request"),
                     ("ID Dokumen", record.get("document_id", "-")),
                     ("Versi", f"V{record.get('document_version', '-')}") ,
                     ("Tanggal Terbit", format_datetime_id(record.get("issued_at", ""))),
@@ -2916,7 +2995,7 @@ def _render_public_verification_page(request_id: str, version: str, token: str) 
                     ("Petugas Pengaju", h.get("nama_pemohon", "-")),
                     ("Tanggal Pengajuan", format_datetime_id(submitted_time)),
                     ("Area / Site", f"{safe_text(h.get('area'))} / {safe_text(h.get('site'))}"),
-                    ("Status Dokumen", status_label(str(h.get("status", "")))),
+                    ("Status Dokumen", status_label(str(final_items.iloc[0].get("status"))) if verified_item_no is not None and not final_items.empty else status_label(str(h.get("status", "")))),
                     ("Status Verifikasi", record.get("verification_status", "ACTIVE")),
                     ("Fingerprint SHA-256", record.get("document_fingerprint", "-")),
                 ]
@@ -3078,14 +3157,18 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
     )
 
     story: list[Any] = [Spacer(1, 13 * mm)]
-    story.append(Paragraph("DOKUMEN PERSETUJUAN", title))
+    document_item_no = str(header.get("document_item_no", "") or "").strip()
+    story.append(Paragraph("DOKUMEN KEPUTUSAN APPROVAL", title))
     story.append(Paragraph("MASTER MATERIAL SAP", title))
     story.append(Paragraph(f"No. {safe_text(header.get('request_id'))}", subtitle))
+    if document_item_no:
+        story.append(Paragraph(f"Keputusan final Item No. {html.escape(document_item_no)}", subtitle))
     story.append(Spacer(1, 5 * mm))
 
     story.extend(_section_bar("A. INFORMASI PERMINTAAN", section))
     info_rows = [
         ["Nomor Request", safe_text(header.get("request_id"))],
+        ["Cakupan Dokumen", f"Item No. {document_item_no}" if document_item_no else "Seluruh item dalam Request ID"],
         ["Tanggal Pengajuan", format_date_id(header.get("created_at"))],
         ["Site Pengaju", _site_actor_name(header.get("site"))],
         ["Petugas Pengaju", safe_text(header.get("nama_pemohon"))],
@@ -3216,6 +3299,11 @@ def build_story(detail: Any, history: pd.DataFrame, verification: dict[str, Any]
         "Item berstatus <b>Rejected</b> merupakan keputusan final pada workflow tersebut, tidak dilanjutkan ke level berikutnya, "
         "dan tidak dikembalikan kepada Pemohon untuk pengajuan ulang pada Request ID yang sama."
     )
+    if document_item_no:
+        statement += (
+            f" Dokumen ini hanya berlaku untuk item nomor <b>{html.escape(document_item_no)}</b> "
+            "dan tidak menyatakan bahwa semua item dalam Request ID telah selesai."
+        )
     story.append(Paragraph(statement, body))
     story.append(Spacer(1, 8 * mm))
 
@@ -3740,7 +3828,7 @@ def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -
         with st.popover('Pengaturan akun', use_container_width=True):
             st.markdown(f'**{html.escape(display_name)}**')
             st.caption(role_name)
-            st.caption('Versi 2026.10.21-R2 | Perbaikan akses L4')
+            st.caption('Versi 2026.10.21-R3 | Dokumen keputusan per item')
             if user.get('email'):
                 st.caption(str(user['email']))
             if user.get('site'):
@@ -5542,121 +5630,154 @@ def _render_pdf_preview(pdf_data: bytes, filename: str) -> None:
 
 
 def render_documents_page(user: dict, request_service: RequestService, approval_service: ApprovalService) -> None:
-    page_heading("Dokumen Persetujuan", "Lihat dan unduh dokumen keputusan approval master material")
+    page_heading("Dokumen Persetujuan", "Lihat keputusan item yang sudah final dan unduh dokumen persetujuan")
     page_intro_banner(
         "Arsip Dokumen Persetujuan",
-        "Pilih Request ID untuk melihat dokumen keputusan akhir. Item yang disetujui ditulis Approved Final dan item yang ditolak ditulis Rejected tanpa dikembalikan ke Pemohon.",
+        "Setiap item berstatus Approved Final atau Rejected dapat dibuatkan dokumen tersendiri. "
+        "Dokumen gabungan per Request ID tersedia ketika semua item sudah memiliki keputusan final.",
     )
-    approved = request_service.get_scoped_headers(user)
-    if not approved.empty:
-        terminal_statuses = {STATUS_APPROVED_FINAL, STATUS_PARTIAL_FINAL, STATUS_REJECTED}
-        approved = approved[approved["status"].astype(str).isin(terminal_statuses)].reset_index(drop=True)
 
-    if approved.empty:
-        st.info("Belum ada dokumen keputusan final. Dokumen tersedia setelah seluruh item pada Request ID selesai dengan status Approved Final dan/atau Rejected.")
+    if st.button("Perbarui daftar dokumen", key="refresh_documents", use_container_width=False):
+        clear_data_cache(SHEET_REQUESTS)
+        clear_data_cache(SHEET_APPROVALS)
+        clear_data_cache(SHEET_DOCUMENTS)
+        st.rerun()
+
+    # Reading decisions per item is essential: the aggregate request status may
+    # still be PENDING_Lx even though another item is already Approved Final.
+    items = request_service.get_scoped_items(user)
+    if items.empty:
+        st.warning(
+            "Belum ada permohonan yang terlihat oleh akun ini. "
+            "Periksa kecocokan Area pada akun dan data permohonan."
+        )
+        return
+    document_entries = available_document_entries(items)
+    if not document_entries:
+        st.info(
+            "Belum ada item dengan keputusan akhir. Dokumen per item tersedia setelah "
+            "status menjadi Approved Final (disetujui L4) atau Rejected. "
+            "Persetujuan L1, L2, atau L3 saja belum menghasilkan keputusan final."
+        )
+        st.caption(
+            f"Ada {len(items)} item dalam cakupan akun, tetapi belum ada yang berstatus "
+            "Approved Final atau Rejected. Gunakan Perbarui daftar dokumen jika persetujuan baru selesai."
+        )
         return
 
     left, center, right = st.columns([2.25, 5.3, 2.15], gap="medium")
-
+    entry_by_key = {entry["key"]: entry for entry in document_entries}
     with left:
         st.markdown('<span class="bima-responsive-document-layout"></span>', unsafe_allow_html=True)
         with st.container(border=True):
             st.markdown('<span class="bima-document-list-marker"></span>', unsafe_allow_html=True)
-            search = st.text_input("Cari dokumen", key="document_search", placeholder="Nomor request / nama material")
-            scoped = approved.copy()
-            if search.strip():
-                q = search.strip().lower()
-                scoped = scoped[
-                    scoped["request_id"].astype(str).str.lower().str.contains(q, na=False)
-                    | scoped["nama_pemohon"].astype(str).str.lower().str.contains(q, na=False)
-                    | scoped["material_name_display"].astype(str).str.lower().str.contains(q, na=False)
-                ].reset_index(drop=True)
-            section_heading("Daftar Dokumen", "Request dengan keputusan akhir Approved Final dan/atau Rejected")
-            if scoped.empty:
-                st.markdown('<div class="bima-empty">Dokumen tidak ditemukan.</div>', unsafe_allow_html=True)
+            search = st.text_input(
+                "Cari dokumen", key="document_search_v2",
+                placeholder="Nomor request / item / material"
+            )
+            q = search.strip().casefold()
+            entries = [entry for entry in document_entries if not q or q in " ".join((
+                entry["request_id"], entry["item_no"], entry["material"], entry["label"]
+            )).casefold()]
+            section_heading("Daftar Dokumen", "Keputusan per item dan dokumen gabungan yang sudah final")
+            if not entries:
+                st.markdown('<div class="bima-empty">Tidak ada dokumen yang cocok dengan pencarian.</div>', unsafe_allow_html=True)
                 return
-            options = scoped["request_id"].astype(str).tolist()
-            labels = {
-                str(row["request_id"]): f"{row['request_id']}  ·  {row.get('material_name_display', '')}"
-                for _, row in scoped.iterrows()
-            }
-            selected = st.radio(
-                "Pilih request",
-                options,
-                format_func=lambda x: labels.get(x, x),
-                key="document_selected",
+            selected_doc_key = st.radio(
+                "Pilih dokumen",
+                [entry["key"] for entry in entries],
+                format_func=lambda key: entry_by_key[key]["label"],
+                key="document_selected_v2",
                 label_visibility="collapsed",
             )
 
-    detail = request_service.get_request(selected)
-    history = approval_service.get_history(selected)
-    if not detail:
-        st.error("Request tidak ditemukan.")
+    selected_entry = entry_by_key[selected_doc_key]
+    request_id = selected_entry["request_id"]
+    item_no = selected_entry["item_no"] or None
+    detail = request_service.get_request(request_id)
+    if not detail or detail.items.empty:
+        st.error("Request atau rincian item tidak ditemukan. Perbarui daftar dokumen.")
         return
+    current_status = detail.items["status"].map(canonical_status)
+    closed = {STATUS_APPROVED_FINAL, STATUS_REJECTED}
+    if item_no is not None:
+        pdf_items = detail.items[detail.items["item_no"].astype(str).str.strip() == item_no].copy()
+        if pdf_items.empty or len(pdf_items) != 1 or canonical_status(pdf_items.iloc[0]["status"]) not in closed:
+            st.warning("Keputusan item telah berubah dan belum dapat dibuatkan dokumen. Perbarui daftar.")
+            return
+        history = approval_service.get_history(request_id, item_no=item_no)
+    else:
+        if not current_status.isin(closed).all():
+            st.warning("Dokumen gabungan belum tersedia karena masih ada item yang sedang diproses.")
+            return
+        pdf_items = detail.items.copy()
+        history = approval_service.get_history(request_id)
 
-    terminal_items = detail.items[
-        detail.items["status"].map(canonical_status).isin([STATUS_APPROVED_FINAL, STATUS_REJECTED])
-    ].copy().reset_index(drop=True)
-    if terminal_items.empty or len(terminal_items) != len(detail.items):
-        st.info("Dokumen final belum tersedia karena masih ada item yang berada dalam proses approval.")
-        return
+    pdf_items = pdf_items.reset_index(drop=True)
     pdf_header = dict(detail.header)
-    pdf_header["status"] = aggregate_item_status(terminal_items)
-    pdf_header["material_name"] = terminal_items.iloc[0].get("material_name", "")
-    pdf_header["material_description_final"] = final_material_description(terminal_items.iloc[0])
-    pdf_detail = RequestDetail(header=pdf_header, items=terminal_items)
-    pdf_history = history.copy()
+    pdf_header["status"] = aggregate_item_status(pdf_items)
+    pdf_header["document_item_no"] = item_no or ""
+    pdf_header["material_name"] = pdf_items.iloc[0].get("material_name", "")
+    pdf_header["material_description_final"] = final_material_description(pdf_items.iloc[0])
+    pdf_detail = RequestDetail(header=pdf_header, items=pdf_items)
+    filename = (
+        f"{request_id}_Item_{re.sub(r'[^A-Za-z0-9_-]', '_', item_no)}_Keputusan_Approval.pdf"
+        if item_no is not None else f"{request_id}_Dokumen_Persetujuan_Gabungan.pdf"
+    )
 
     try:
-        with st.spinner("Membuat preview dan QR verifikasi dokumen..."):
+        with st.spinner("Menyiapkan dokumen keputusan dan QR verifikasi..."):
             verification = prepare_document_verification(
                 pdf_detail,
-                pdf_history,
+                history,
                 generated_by=str(user.get("username", "")),
+                document_key=selected_doc_key,
             )
-            pdf_data = generate_approval_pdf(pdf_detail, pdf_history, verification=verification)
+            pdf_data = generate_approval_pdf(pdf_detail, history, verification=verification)
     except (PDFGenerationError, SheetsServiceError) as exc:
         st.error(str(exc))
         return
 
+    if item_no is not None:
+        st.caption(
+            f"Dokumen ini hanya untuk Item {item_no} pada Request {request_id}. "
+            "Item lainnya yang belum selesai tidak termasuk dalam keputusan PDF ini."
+        )
+
     with center:
         with st.container(border=True):
             st.markdown('<span class="bima-document-preview-marker"></span>', unsafe_allow_html=True)
-            _render_pdf_preview(pdf_data, f"{selected}_Dokumen_Persetujuan.pdf")
+            _render_pdf_preview(pdf_data, filename)
 
     with right:
         downloaded = st.download_button(
-            "Download PDF",
-            data=pdf_data,
-            file_name=f"{selected}_Dokumen_Persetujuan.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True,
+            "Download PDF", data=pdf_data, file_name=filename,
+            mime="application/pdf", type="primary", use_container_width=True,
         )
         if downloaded:
-            record_generation(selected, str(user.get("username", "")))
+            record_generation(selected_doc_key, str(user.get("username", "")))
             log_event(
-                str(user.get("username", "")),
-                str(user.get("role", "")),
-                "DOWNLOAD_DOCUMENT",
-                selected,
-                "Mengunduh dokumen persetujuan PDF.",
+                str(user.get("username", "")), str(user.get("role", "")),
+                "DOWNLOAD_DOCUMENT", selected_doc_key,
+                "Mengunduh dokumen keputusan item." if item_no else "Mengunduh dokumen gabungan.",
             )
         st.write("")
         with st.container(border=True):
             st.markdown('<span class="bima-document-info-marker"></span>', unsafe_allow_html=True)
             section_heading("Informasi Dokumen")
-            h = detail.header
+            h = pdf_header
+            final_summary = final_material_description(pdf_items.iloc[0]) if len(pdf_items) == 1 else "Lihat rincian item pada PDF"
             st.markdown(
                 f'''
                 <div class="document-info-list">
-                  <div><span>Nomor Request</span><strong>{html.escape(safe_text(h.get('request_id')))}</strong></div>
+                  <div><span>Nomor Request</span><strong>{html.escape(safe_text(request_id))}</strong></div>
+                  <div><span>Cakupan Keputusan</span><strong>{html.escape('Item ' + item_no if item_no else 'Seluruh item dalam request')}</strong></div>
                   <div><span>ID Dokumen</span><strong>{html.escape(safe_text(verification.get('document_id')))}</strong></div>
                   <div><span>Versi</span><strong>V{html.escape(safe_text(verification.get('document_version')))}</strong></div>
-                  <div><span>Deskripsi Material Final</span><strong>{html.escape(safe_text(final_material_description(h) or 'Lihat rincian item'))}</strong></div>
+                  <div><span>Deskripsi Material Final</span><strong>{html.escape(final_summary or 'Tidak ada (Rejected)')}</strong></div>
                   <div><span>Tanggal Pengajuan</span><strong>{html.escape(format_date_id(h.get('created_at')))}</strong></div>
                   <div><span>Site Pengaju</span><strong>{html.escape(_site_actor_name(h.get('site')))}</strong></div>
-                  <div><span>Status</span>{status_badge_html(str(h.get('status','')))}</div>
+                  <div><span>Status Keputusan</span>{status_badge_html(str(h.get('status', '')))}</div>
                   <div><span>Verifikasi QR</span><strong style="color:#118959">ACTIVE</strong></div>
                 </div>
                 ''',
@@ -5665,9 +5786,13 @@ def render_documents_page(user: dict, request_service: RequestService, approval_
             st.write("")
             section_heading("QR Keaslian")
             st.image(verification["qr_png"], width=150)
-            st.caption("Scan QR pada PDF atau QR di atas untuk membuka halaman verifikasi keaslian dokumen.")
+            st.caption("Scan QR pada PDF untuk melihat keputusan yang spesifik pada dokumen ini.")
             if str(verification.get("verification_url", "")).startswith("http"):
-                st.link_button("Buka Halaman Verifikasi", str(verification["verification_url"]), use_container_width=True)
+                st.link_button(
+                    "Buka Halaman Verifikasi",
+                    str(verification["verification_url"]),
+                    use_container_width=True,
+                )
 
 
 # ============================== pages_app/profile.py ==============================
