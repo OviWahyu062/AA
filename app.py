@@ -5964,6 +5964,14 @@ def _save_login_cookie() -> None:
     )
 
 def _restore_login_cookie() -> None:
+    # Cookie deletion is asynchronous; never restore a session after explicit logout.
+    if st.session_state.get("logout_requested", False) or _query_param_value("logged_out") == "1":
+        st.session_state["authenticated"] = False
+        st.session_state["logged_in"] = False
+        _clear_login_cookie()
+        return
+    if st.session_state.get("authenticated", False):
+        return
     raw = cookie_manager.get("pt_bima_session")
     if not raw:
         return
@@ -5977,7 +5985,11 @@ def _restore_login_cookie() -> None:
         cookie_manager.delete("pt_bima_session")
 
 def _clear_login_cookie() -> None:
-    cookie_manager.delete("pt_bima_session")
+    # Expire even when CookieManager has not loaded its browser snapshot yet.
+    cookie_manager.set(
+        "pt_bima_session", "", expires_at=datetime.now() - timedelta(days=1),
+        key="clear_pt_bima_session",
+    )
 
 
 def _init_session() -> None:
@@ -7273,6 +7285,8 @@ def _render_login() -> None:
                 st.error("Login gagal diproses. Periksa koneksi dan konfigurasi sistem.")
 
 def _set_authenticated_user(user: dict) -> None:
+    st.session_state.pop("logout_requested", None)
+    st.query_params.pop("logged_out", None)
     st.session_state["authenticated"] = True
     st.session_state["logged_in"] = True
     for key in ["username", "nama", "role", "jabatan", "area", "site", "email", "no_hp", "nomor_pegawai"]:
@@ -7290,10 +7304,19 @@ def _current_user() -> dict:
 
 
 def _logout(user: dict) -> None:
-    _clear_login_cookie()
-    log_event(str(user.get("username", "")), str(user.get("role", "")), "LOGOUT", "", "Logout dari sistem.")
+    # Clear the account first, independently of remote audit logging.
     for key in list(st.session_state.keys()):
         del st.session_state[key]
+    st.session_state["authenticated"] = False
+    st.session_state["logged_in"] = False
+    st.session_state["logout_requested"] = True
+    # Keep the logout guard across a browser refresh while cookie deletion completes.
+    st.query_params["logged_out"] = "1"
+    try:
+        log_event(str(user.get("username", "")), str(user.get("role", "")), "LOGOUT", "", "Logout dari sistem.")
+    except Exception:
+        pass  # An unavailable audit backend must not keep the account signed in.
+    # The next login-page run expires the cookie without interrupting its component.
     st.rerun()
 
 
