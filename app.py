@@ -3771,7 +3771,7 @@ def render_header(user: dict, notification_count: int = 0) -> bool:
     """
     pelindo = image_to_data_uri(PELINDO_BIMA_LOGO)
     danantara = image_to_data_uri(DANANTARA_LOGO)
-    with st.container(border=False):
+    with st.container(border=False, key="corporate_header"):
         st.markdown(
             '<span class="bima-header-marker"></span>'
             '<div class="enterprise-responsive-header">'
@@ -3852,13 +3852,6 @@ def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -
             if st.button('Keluar dari sistem', icon=':material/logout:',
                          key='enterprise_sidebar_logout', use_container_width=True):
                 _logout(user)
-
-        dark = st.session_state.get('theme_mode') == 'dark'
-        if st.button('Mode Terang' if dark else 'Mode Gelap',
-                     icon=':material/light_mode:' if dark else ':material/dark_mode:',
-                     key='toggle_theme', use_container_width=True):
-            st.session_state['theme_mode'] = 'light' if dark else 'dark'
-            st.rerun()
 
         st.markdown(
             '<div class="bima-sidebar-bottom-brand">'
@@ -5945,10 +5938,9 @@ st.set_page_config(
 )
 
 
-# Legacy cookie helpers retained for compatibility, but authentication is no longer
-# restored from browser cookies because stale cookies can undo an explicit logout.
-# Streamlit session_state persists across normal reruns. The logout action still deletes
-# the legacy cookie so older browser state is cleaned up.
+# Persistent login cookie to prevent logout when browser reruns due to resize/device changes
+# Using extra_streamlit_components because streamlit_cookies_manager is not compatible
+# with Streamlit >= 1.45 (it still uses deprecated st.cache).
 
 cookie_manager = stx.CookieManager()
 
@@ -6045,7 +6037,7 @@ def _inject_logged_in_css() -> None:
           .bima-sidebar-bottom-brand strong {{ display:block; font-size:15px; line-height:1.25; letter-spacing:.015em; font-weight:500; margin-bottom:36px; }}
           .bima-sidebar-bottom-brand span {{ display:block; font-size:9.5px; line-height:1.4; color:#28638F; font-weight:600; }}
 
-          div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{ position:sticky !important; top:0 !important; z-index:1000 !important; background:linear-gradient(180deg,#F8FCFF 0%,#F2F8FD 100%) !important; border-bottom:1px solid #DCE7F0 !important; margin:0 -24px 18px !important; padding:0 24px !important; min-height:72px !important; box-shadow:0 1px 4px rgba(15,23,42,.025) !important; }}
+          .st-key-corporate_header {{ position:sticky !important; top:0 !important; z-index:1000 !important; background:linear-gradient(180deg,#F8FCFF 0%,#F2F8FD 100%) !important; border-bottom:1px solid #DCE7F0 !important; margin:0 -24px 18px !important; padding:0 24px !important; min-height:72px !important; box-shadow:0 1px 4px rgba(15,23,42,.025) !important; }}
           .bima-header-marker {{ display:none !important; }}
           .bima-header-context {{ display:none !important; }}
           .bima-header-user {{ display:flex; align-items:center; gap:9px; justify-content:flex-start !important; white-space:nowrap; }}
@@ -6232,14 +6224,14 @@ def _inject_logged_in_css() -> None:
           @media (max-width:1199px) {{
             section[data-testid="stSidebar"] {{ width:200px !important; min-width:200px !important; }}
             [data-testid="stMainBlockContainer"] {{ padding-left:18px !important; padding-right:18px !important; }}
-            div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{ margin-left:-18px !important; margin-right:-18px !important; padding-left:18px !important; padding-right:18px !important; }}
+            .st-key-corporate_header {{ margin-left:-18px !important; margin-right:-18px !important; padding-left:18px !important; padding-right:18px !important; }}
             .bima-page-head h1 {{ font-size:24px !important; }}
             .bima-metric-value {{ font-size:22px !important; }}
             .bima-sidebar-bottom-brand strong {{ font-size:13px !important; }}
           }}
           @media (max-width:767px) {{
             [data-testid="stMainBlockContainer"] {{ padding-left:12px !important; padding-right:12px !important; }}
-            div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{ margin-left:-12px !important; margin-right:-12px !important; padding-left:12px !important; padding-right:12px !important; }}
+            .st-key-corporate_header {{ margin-left:-12px !important; margin-right:-12px !important; padding-left:12px !important; padding-right:12px !important; }}
             .bima-header-context {{ display:none !important; }}
             .bima-page-head {{ flex-direction:column !important; }}
             .bima-page-period {{ min-width:100% !important; width:100% !important; }}
@@ -6486,7 +6478,7 @@ _ENTERPRISE_CSS = r"""
 [data-testid="stVerticalBlockBorderWrapper"] > div {padding:18px 20px !important;}
 
 /* Consistent topbar: title left and corporate logos right. */
-div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
+.st-key-corporate_header {
   position:relative !important; z-index:5 !important;
   min-height:91px !important;
   margin:0 -30px 25px !important;
@@ -6496,7 +6488,7 @@ div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
   box-shadow:none !important;
   backdrop-filter:blur(9px);
 }
-div[data-testid="stVerticalBlock"]:has(.bima-header-marker) > div {width:100%;}
+.st-key-corporate_header > div {width:100%;}
 .enterprise-header-brand {display:flex;flex-direction:column;gap:5px;padding:3px 0;}
 .enterprise-header-brand strong {font-size:18px;color:#0751bb;letter-spacing:.02em;font-weight:800;line-height:1.15;}
 .enterprise-header-brand span {font-size:12.5px;color:#637ca4;line-height:1.35;font-weight:520;}
@@ -6649,7 +6641,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ux-approval-queue-marker):n
   section[data-testid="stSidebar"] {width:226px !important;min-width:226px !important;}
   [data-testid="stMainBlockContainer"] {padding-left:21px !important;padding-right:21px !important;}
   .enterprise-pelindo-logo {width:185px;}.enterprise-danantara-logo {width:134px;}
-  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {margin-left:-21px !important;margin-right:-21px !important;padding-left:21px !important;padding-right:21px !important;}
+  .st-key-corporate_header {margin-left:-21px !important;margin-right:-21px !important;padding-left:21px !important;padding-right:21px !important;}
   .bima-page-head h1 {font-size:31px !important;}
 }
 @media(max-width:1060px) {
@@ -6666,7 +6658,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ux-approval-queue-marker):n
 @media(max-width:760px) {
   [data-testid="stMainBlockContainer"] {padding:0 13px 35px !important;}
   [data-testid="stAppViewContainer"] {background-size:100% 270px,auto 270px !important;}
-  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {margin:0 -13px 15px !important;padding:12px 13px !important;min-height:77px !important;}
+  .st-key-corporate_header {margin:0 -13px 15px !important;padding:12px 13px !important;min-height:77px !important;}
   .enterprise-company-logos {min-height:41px;gap:6px;}
   .enterprise-pelindo-logo {max-width:62%;height:38px;}
   .enterprise-danantara-logo {max-width:33%;height:30px;}
@@ -6710,7 +6702,7 @@ def _inject_enterprise_css() -> None:
           .enterprise-sidebar-profile {background:#1f2d44 !important;border-color:#344861 !important;}
           .enterprise-profile-meta strong,.bima-sidebar-bottom-brand strong {color:#e6f0ff !important;}
           .enterprise-profile-meta span,.bima-sidebar-bottom-brand span {color:#aec3db !important;}
-          div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {background:#17243aea !important;}
+          .st-key-corporate_header {background:#17243aea !important;}
           .enterprise-header-brand span {color:#bed0eb !important;}
           .enterprise-header-brand strong {color:#8bbdff !important;}
           .bima-page-head h1,.bima-section-title h3,.bima-metric-label,.bima-metric-value {color:#e2edff !important;}
@@ -6808,7 +6800,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] { min-width:0
     width:100% !important; max-width:100% !important;
     padding:0 14px max(30px,env(safe-area-inset-bottom)) !important;
   }
-  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
+  .st-key-corporate_header {
     position:relative !important; top:auto !important;
     margin:0 -14px 12px !important; padding:14px 14px 13px !important;
     min-height:unset !important;
@@ -6944,7 +6936,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] { min-width:0
 /* Narrow phones: full-width KPI cards and single-file approval path. */
 @media (max-width:380px) {
   [data-testid="stMainBlockContainer"] {padding-left:11px !important; padding-right:11px !important;}
-  div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {
+  .st-key-corporate_header {
     margin-left:-11px !important; margin-right:-11px !important;
     padding-left:11px !important; padding-right:11px !important;
   }
@@ -7058,7 +7050,7 @@ def _inject_glass_theme_css() -> None:
           box-shadow:0 9px 22px rgba(0,102,179,.20) !important; border-color:rgba(255,255,255,.20) !important;
         }}
 
-        div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{
+        .st-key-corporate_header {{
           background:rgba(246,250,253,.66) !important;
           border-bottom:1px solid rgba(255,255,255,.72) !important;
           backdrop-filter:blur(19px) saturate(130%) !important;
@@ -7107,7 +7099,7 @@ def _inject_glass_theme_css() -> None:
           [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {{
             top:12px !important; left:10px !important; width:38px !important; height:38px !important;
           }}
-          div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{
+          .st-key-corporate_header {{
             background:rgba(247,251,254,.76) !important;
           }}
           div[data-testid="stVerticalBlockBorderWrapper"], .bima-metric-card, .bima-card {{
@@ -7120,265 +7112,72 @@ def _inject_glass_theme_css() -> None:
     )
 
 
-def _inject_liquid_glass_v2_css() -> None:
-    """Strong liquid-glass visual layer based on the supplied UI reference."""
-    port_bg = image_to_data_uri(HEADER_PORT_BG)
-    st.markdown(
-        f"""
-        <style>
-        :root {{
-          --lg-line:rgba(255,255,255,.18);
-          --lg-text:#F5F8FB;
-          --lg-muted:#C1CFDA;
-          --lg-blue:#19A8F0;
-          --lg-blue-2:#0B78D1;
-          --lg-shadow:0 24px 65px rgba(0,0,0,.24);
-          --lg-blur:blur(24px) saturate(125%);
-        }}
-
-        html, body, [data-testid="stAppViewContainer"] {{color:var(--lg-text) !important;}}
-        [data-testid="stAppViewContainer"] {{
-          background:
-            linear-gradient(115deg,rgba(8,13,19,.86),rgba(21,31,41,.74) 45%,rgba(10,20,29,.84)),
-            url('{port_bg}') center / cover fixed no-repeat !important;
-        }}
-        [data-testid="stMainBlockContainer"] {{max-width:1480px !important;padding:18px 26px 42px !important;}}
-
-        [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {{
-          display:flex !important; visibility:visible !important; opacity:1 !important;
-        }}
-        .st-key-sidebar_show_control {{position:fixed !important;top:15px !important;left:15px !important;z-index:100500 !important;width:auto !important;}}
-        .st-key-sidebar_show_control button {{
-          min-height:42px !important;padding:0 15px !important;border-radius:14px !important;color:#fff !important;
-          background:rgba(35,45,56,.72) !important;border:1px solid rgba(255,255,255,.22) !important;
-          backdrop-filter:blur(18px) !important;box-shadow:0 12px 30px rgba(0,0,0,.24) !important;
-        }}
-
-        section[data-testid="stSidebar"] {{
-          width:245px !important;min-width:245px !important;background:rgba(24,32,42,.70) !important;
-          border-right:1px solid var(--lg-line) !important;box-shadow:16px 0 45px rgba(0,0,0,.20) !important;
-          backdrop-filter:var(--lg-blur) !important;
-        }}
-        section[data-testid="stSidebar"] > div:first-child {{
-          padding:18px 14px 28px !important;overflow-y:auto !important;overflow-x:hidden !important;
-          background:linear-gradient(180deg,rgba(43,53,63,.76),rgba(20,28,38,.68)) !important;
-          backdrop-filter:var(--lg-blur) !important;
-        }}
-        section[data-testid="stSidebar"] * {{visibility:visible !important;}}
-        .liquid-sidebar-brand {{
-          display:flex;align-items:center;justify-content:center;gap:10px;min-height:58px;margin:0 0 10px;padding:10px 9px;
-          border:1px solid var(--lg-line);border-radius:17px;background:rgba(255,255,255,.085);
-          box-shadow:inset 0 1px 0 rgba(255,255,255,.10);backdrop-filter:blur(18px);
-        }}
-        .liquid-sidebar-brand img:first-child {{width:102px;max-height:36px;object-fit:contain;}}
-        .liquid-sidebar-brand img:last-child {{width:92px;max-height:34px;object-fit:contain;}}
-        .liquid-sidebar-brand span {{height:28px;width:1px;background:rgba(255,255,255,.26);}}
-        .st-key-sidebar_hide_control button {{
-          min-height:36px !important;border-radius:12px !important;margin-bottom:10px !important;
-          background:rgba(255,255,255,.07) !important;color:#D8E6EF !important;border:1px solid rgba(255,255,255,.12) !important;
-        }}
-        .enterprise-sidebar-profile {{background:rgba(255,255,255,.085) !important;border:1px solid var(--lg-line) !important;box-shadow:none !important;border-radius:17px !important;color:#fff !important;}}
-        .enterprise-profile-meta strong {{color:#fff !important;}}
-        .enterprise-profile-meta span {{color:#B9CAD7 !important;}}
-        .enterprise-avatar {{background:linear-gradient(135deg,var(--lg-blue-2),var(--lg-blue)) !important;color:#fff !important;box-shadow:0 8px 22px rgba(0,126,208,.26) !important;}}
-        .enterprise-sidebar-divider {{background:rgba(255,255,255,.11) !important;}}
-        .bima-sidebar-title {{color:#9FB2C2 !important;}}
-        section[data-testid="stSidebar"] [data-testid="stButton"] button {{color:#E8F0F6 !important;border-radius:13px !important;border:1px solid transparent !important;min-height:42px !important;}}
-        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"] {{background:rgba(255,255,255,.035) !important;}}
-        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover {{background:rgba(255,255,255,.11) !important;border-color:rgba(255,255,255,.12) !important;}}
-        section[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {{background:linear-gradient(135deg,#0A72C7,#19A8F0) !important;border-color:rgba(255,255,255,.16) !important;box-shadow:0 10px 24px rgba(0,113,190,.25) !important;}}
-        .bima-sidebar-bottom-brand strong {{color:#F7FAFC !important;}}
-        .bima-sidebar-bottom-brand span,.bima-sidebar-bottom-brand small {{color:#9FB4C4 !important;}}
-
-        div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{
-          position:sticky !important;top:12px !important;z-index:9990 !important;margin:0 0 18px !important;padding:0 16px !important;min-height:68px !important;
-          background:rgba(44,53,63,.60) !important;border:1px solid var(--lg-line) !important;border-radius:20px !important;
-          box-shadow:var(--lg-shadow) !important;backdrop-filter:var(--lg-blur) !important;
-        }}
-        .enterprise-header-brand strong {{color:#FFFFFF !important;}}
-        .enterprise-header-brand span {{color:#BFD0DC !important;}}
-        .enterprise-company-logos {{filter:drop-shadow(0 4px 10px rgba(0,0,0,.18));}}
-
-        .bima-page-head {{margin:8px 0 18px !important;}}
-        .bima-page-head h1 {{color:#FFFFFF !important;font-size:32px !important;font-weight:680 !important;}}
-        .bima-page-head p {{color:#BFD0DB !important;font-size:13.5px !important;}}
-        .bima-breadcrumb {{color:#98ADBC !important;}}
-        .enterprise-dashboard-date {{color:#EEF7FC !important;background:rgba(255,255,255,.09) !important;border:1px solid rgba(255,255,255,.16) !important;box-shadow:none !important;backdrop-filter:blur(16px) !important;border-radius:17px !important;}}
-
-        .ux-overview {{
-          background:linear-gradient(145deg,rgba(73,80,88,.57),rgba(38,47,57,.62)) !important;border:1px solid rgba(255,255,255,.20) !important;
-          border-radius:24px !important;box-shadow:var(--lg-shadow) !important;backdrop-filter:var(--lg-blur) !important;padding:22px !important;margin:6px 0 20px !important;
-        }}
-        .ux-overview-title .ux-overview-heading strong {{color:#FFFFFF !important;font-size:18px !important;}}
-        .ux-overview-title .ux-overview-heading span,.ux-overview-aside {{color:#BFD0DB !important;}}
-        .ux-overview-track {{background:rgba(255,255,255,.045) !important;border:1px solid rgba(255,255,255,.10) !important;border-radius:19px !important;padding:10px !important;gap:10px !important;}}
-        .ux-overview-step {{background:rgba(255,255,255,.055) !important;border:1px solid rgba(255,255,255,.08) !important;border-radius:16px !important;min-height:94px !important;color:#E8F0F5 !important;}}
-        .ux-overview-step.ux-stage-focus {{background:linear-gradient(145deg,rgba(0,119,210,.55),rgba(21,167,239,.26)) !important;border-color:rgba(93,199,255,.62) !important;box-shadow:0 12px 28px rgba(0,113,190,.20) !important;}}
-        .ux-overview-number {{background:rgba(255,255,255,.10) !important;border-color:rgba(255,255,255,.18) !important;color:#DDEBF4 !important;}}
-        .ux-overview-step.ux-stage-focus .ux-overview-number {{background:#0A83D9 !important;color:#fff !important;box-shadow:0 0 0 5px rgba(38,171,241,.20) !important;}}
-        .ux-overview-meta strong {{color:#F7FAFC !important;}}
-        .ux-overview-meta small {{color:#AEC0CD !important;}}
-        .ux-stage-icon {{color:#B9D2E2 !important;}}
-        .ux-overview-step:not(:last-child)::after {{color:#63C8FA !important;}}
-
-        .bima-metric-card {{
-          background:linear-gradient(145deg,rgba(255,255,255,.12),rgba(255,255,255,.065)) !important;border:1px solid rgba(255,255,255,.16) !important;
-          border-radius:20px !important;box-shadow:0 18px 40px rgba(0,0,0,.16) !important;backdrop-filter:blur(19px) saturate(120%) !important;min-height:145px !important;
-        }}
-        .bima-metric-card::before {{height:2px !important;background:linear-gradient(90deg,var(--accent,#19A8F0),transparent) !important;}}
-        .bima-metric-card::after {{display:none !important;}}
-        .bima-metric-icon {{background:rgba(255,255,255,.10) !important;border:1px solid rgba(255,255,255,.10) !important;color:var(--accent,#19A8F0) !important;}}
-        .bima-metric-label {{color:#D5E2EB !important;}}
-        .bima-metric-value {{color:#FFFFFF !important;font-weight:690 !important;}}
-        .bima-metric-note {{color:#AFC0CC !important;}}
-
-        div[data-testid="stVerticalBlockBorderWrapper"], .bima-card, .bima-page-intro,[data-testid="stExpander"], .bima-form-panel {{
-          background:rgba(50,59,69,.57) !important;border:1px solid rgba(255,255,255,.15) !important;
-          box-shadow:0 18px 42px rgba(0,0,0,.16) !important;backdrop-filter:blur(21px) saturate(120%) !important;border-radius:20px !important;
-        }}
-        .bima-section-title h3,.bima-card-title,.bima-form-panel-head strong {{color:#F7FAFC !important;}}
-        .bima-section-title::before {{background:#21B2F6 !important;}}
-        .bima-card-subtitle,.bima-form-panel-head span,[data-testid="stCaptionContainer"],.stCaption {{color:#AFC1CE !important;}}
-        .bima-table-head {{background:rgba(255,255,255,.08) !important;color:#D7E4ED !important;border-color:rgba(255,255,255,.10) !important;}}
-        .bima-table-cell {{color:#EAF1F6 !important;}}
-        .bima-table-row-wrap {{border-color:rgba(255,255,255,.08) !important;}}
-        .bima-empty {{background:rgba(255,255,255,.05) !important;color:#B7C8D4 !important;border-color:rgba(255,255,255,.15) !important;}}
-        .bima-insight {{color:#D9E5ED !important;border-color:rgba(255,255,255,.08) !important;}}
-
-        h1,h2,h3,h4,p,label,.stMarkdown {{color:var(--lg-text);}}
-        [data-testid="stTextInput"] input,[data-testid="stNumberInput"] input,[data-testid="stDateInput"] input,[data-testid="stSelectbox"] > div > div,[data-testid="stTextArea"] textarea,[data-testid="stMultiSelect"] > div > div {{
-          color:#F6FAFC !important;background:rgba(255,255,255,.09) !important;border:1px solid rgba(255,255,255,.16) !important;border-radius:14px !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.08) !important;
-        }}
-        [data-testid="stTextInput"] input::placeholder,[data-testid="stTextArea"] textarea::placeholder {{color:#9FB2C0 !important;}}
-        [data-baseweb="select"] * {{color:#EAF2F7 !important;}}
-        [data-baseweb="popover"] [role="listbox"] {{background:#27323D !important;border:1px solid rgba(255,255,255,.16) !important;}}
-        [data-baseweb="popover"] [role="option"] {{color:#EDF4F8 !important;}}
-        [data-baseweb="popover"] [role="option"]:hover {{background:#334657 !important;}}
-        [data-testid="stFileUploader"] {{background:rgba(255,255,255,.06) !important;border-color:rgba(255,255,255,.18) !important;}}
-        [data-testid="stDownloadButton"] button,[data-testid="stLinkButton"] a {{background:rgba(255,255,255,.08) !important;color:#EAF6FD !important;border-color:rgba(255,255,255,.15) !important;}}
-        [data-testid="stButton"] button[kind="primary"] {{background:linear-gradient(135deg,#0873C9,#19A8F0) !important;color:#fff !important;border-color:rgba(255,255,255,.14) !important;box-shadow:0 12px 25px rgba(0,108,184,.22) !important;}}
-
-        .js-plotly-plot,.plot-container,.svg-container {{background:transparent !important;}}
-
-        @media (max-width:1180px) {{
-          section[data-testid="stSidebar"] {{width:225px !important;min-width:225px !important;}}
-          [data-testid="stMainBlockContainer"] {{padding-left:18px !important;padding-right:18px !important;}}
-        }}
-        @media (max-width:820px) {{
-          [data-testid="stMainBlockContainer"] {{padding:12px 12px 32px !important;}}
-          div[data-testid="stVerticalBlock"]:has(.bima-header-marker) {{top:8px !important;border-radius:17px !important;padding:0 12px !important;}}
-          .enterprise-responsive-header .enterprise-header-brand {{padding-left:0 !important;}}
-          .ux-overview {{padding:15px !important;border-radius:20px !important;}}
-          .ux-overview-step {{min-height:74px !important;}}
-          .bima-page-head h1 {{font-size:26px !important;}}
-          .st-key-sidebar_show_control {{top:10px !important;left:10px !important;}}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _inject_theme_css() -> None:
-    mode = st.session_state.get("theme_mode", "light")
-    if mode == "dark":
-        st.markdown("""
-        <style>
-        [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e5e7eb !important; }
-        [data-testid="stSidebar"] > div:first-child { background:#111827 !important; }
-        [data-testid="stSidebar"] button { color:#e5e7eb !important; }
-        .bima-page-head h1, .bima-page-head p, .bima-page-period .value, .bima-page-period .label { color:#e5e7eb !important; }
-        div[data-testid="stVerticalBlockBorderWrapper"], .bima-metric-card { background:#1e293b !important; border-color:#334155 !important; color:#e5e7eb !important; }
-        .bima-table-head { background:#334155 !important; color:#f8fafc !important; }
-        .bima-table-cell { color:#e5e7eb !important; }
-        [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-testid="stSelectbox"] div { background:#111827 !important; color:#f8fafc !important; }
-        [data-testid="stForm"] { background:#1e293b !important; border-color:#334155 !important; }
-        .bima-user-meta strong { color:#f8fafc !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
-
-
 def _inject_sidebar_visibility_fix_css() -> None:
-    """Final sidebar control override. Keeps the sidebar visible on load and allows native hide/show."""
-    st.markdown(
-        """
-        <style>
-        /* Sidebar itself must never be rendered as an empty reserved column. */
-        section[data-testid="stSidebar"] {
-          display:block !important;
-          visibility:visible !important;
-          opacity:1 !important;
-        }
-        section[data-testid="stSidebar"] > div:first-child {
-          visibility:visible !important;
-          opacity:1 !important;
-          overflow-y:auto !important;
-        }
-
-        /* Restore Streamlit native collapse button inside an expanded sidebar. */
-        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
-        section[data-testid="stSidebar"] button[aria-label*="Collapse sidebar"],
-        section[data-testid="stSidebar"] button[aria-label*="Close sidebar"] {
-          display:flex !important;
-          visibility:visible !important;
-          opacity:1 !important;
-          pointer-events:auto !important;
-          position:relative !important;
-          z-index:100500 !important;
-        }
-
-        /* Restore the reopen control after the sidebar has been collapsed. */
-        [data-testid="collapsedControl"],
-        [data-testid="stSidebarCollapsedControl"] {
-          display:flex !important;
-          visibility:visible !important;
-          opacity:1 !important;
-          pointer-events:auto !important;
-          position:fixed !important;
-          top:14px !important;
-          left:14px !important;
-          width:42px !important;
-          height:42px !important;
-          z-index:100600 !important;
-          border-radius:13px !important;
-          background:rgba(31,42,54,.88) !important;
-          border:1px solid rgba(255,255,255,.22) !important;
-          box-shadow:0 10px 28px rgba(0,0,0,.25) !important;
-          backdrop-filter:blur(16px) !important;
-        }
-        [data-testid="collapsedControl"] button,
-        [data-testid="stSidebarCollapsedControl"] button {
-          display:flex !important;
-          visibility:visible !important;
-          opacity:1 !important;
-          pointer-events:auto !important;
-          color:#FFFFFF !important;
-        }
-
-        /* Older theme rules set the header to hidden. Keep its frame transparent while
-           allowing Streamlit's sidebar controls to remain interactive. */
-        [data-testid="stHeader"] {
-          visibility:visible !important;
-          display:block !important;
-          height:0 !important;
-          min-height:0 !important;
-          background:transparent !important;
-          pointer-events:none !important;
-          z-index:100550 !important;
-        }
-        [data-testid="stHeader"] button,
-        [data-testid="stHeader"] [data-testid="stSidebarCollapsedControl"] {
-          pointer-events:auto !important;
-        }
-        [data-testid="stHeader"] [data-testid="stToolbar"],
-        [data-testid="stHeader"] [data-testid="stDecoration"] {
-          display:none !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    """One session-state controller owns the drawer, independent of native collapse state."""
+    is_open = st.session_state.get("material_sidebar_open", True)
+    if st.button("Sembunyikan menu" if is_open else "Tampilkan menu",
+                 icon=":material/menu_open:" if is_open else ":material/menu:",
+                 key="material_sidebar_toggle", help="Buka atau tutup navigasi aplikasi"):
+        st.session_state["material_sidebar_open"] = not is_open
+        st.rerun()
+    visibility = "block" if is_open else "none"
+    offset = "280px" if is_open else "0px"
+    st.markdown("""
+    <style>
+    /* Native collapse state must not hide the children of our controlled drawer. */
+    section[data-testid="stSidebar"] {
+      display:__DISPLAY__ !important; position:fixed !important;
+      inset:0 auto 0 0 !important; transform:none !important;
+      width:280px !important; min-width:280px !important; max-width:85vw !important;
+      margin:0 !important; height:100dvh !important;
+      visibility:visible !important; opacity:1 !important; z-index:100010 !important;
+      background:rgba(245,250,255,.96) !important;
+      border-right:1px solid #d6e4ef !important;
+      box-shadow:8px 0 30px rgba(28,65,95,.08) !important;
+    }
+    section[data-testid="stSidebar"] > div:first-child {
+      position:relative !important; transform:none !important;
+      height:100% !important; padding:72px 14px 24px !important;
+      overflow-y:auto !important; background:transparent !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stSidebarContent"],
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+      display:block !important; visibility:visible !important; opacity:1 !important;
+      transform:none !important; content-visibility:visible !important;
+    }
+    [data-testid="stSidebarHeader"], [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] {
+      display:none !important;
+    }
+    /* This is a real Streamlit button, always mounted outside the drawer. */
+    .st-key-material_sidebar_toggle {
+      position:fixed !important; top:12px !important; left:16px !important;
+      width:240px !important; max-width:74vw !important; z-index:100020 !important;
+    }
+    .st-key-material_sidebar_toggle button {
+      min-height:42px !important; width:100% !important; color:#164b73 !important;
+      background:#ffffff !important; border:1px solid #bdd5e7 !important;
+      border-radius:12px !important; box-shadow:0 4px 14px #164b7312 !important;
+    }
+    [data-testid="stMain"], section.main {
+      margin-left:__OFFSET__ !important; width:calc(100% - __OFFSET__) !important;
+    }
+    [data-testid="stMainBlockContainer"] {padding-top:76px !important;}
+    [data-testid="stHeader"] {display:none !important;}
+    .liquid-sidebar-brand {
+      display:flex;align-items:center;justify-content:center;gap:12px;
+      padding:14px 8px;margin-bottom:16px;background:rgba(255,255,255,.8);
+      border:1px solid #dce8f1;border-radius:14px;
+    }
+    .liquid-sidebar-brand img {width:104px;max-width:46%;height:38px;object-fit:contain;}
+    .liquid-sidebar-brand span {height:28px;width:1px;background:#ccdce8;}
+    .bima-sidebar-bottom-brand {position:relative !important;margin-top:28px !important;}
+    @media(max-width:820px) {
+      [data-testid="stMain"], section.main {margin-left:0 !important;width:100% !important;}
+      section[data-testid="stSidebar"] {min-width:0 !important;width:min(280px,85vw) !important;}
+    }
+    </style>
+    """.replace("__DISPLAY__", visibility).replace("__OFFSET__", offset), unsafe_allow_html=True)
 
 
 def _render_login() -> None:
@@ -7396,17 +7195,17 @@ def _render_login() -> None:
           .login-logos img:last-child {{ width:136px !important; max-height:43px !important; }}
           .login-side-copy {{ left:5.2vw !important; top:43vh !important; font-size:10px !important; letter-spacing:.12em !important; color:rgba(255,255,255,.78) !important; text-shadow:0 1px 12px rgba(0,0,0,.25) !important; }}
           .login-footer-copy {{ left:5.2vw !important; bottom:4.2vh !important; font-size:9px !important; color:rgba(255,255,255,.68) !important; text-shadow:0 1px 10px rgba(0,0,0,.22) !important; }}
-          [data-testid="stForm"] {{ width:100% !important; max-width:410px !important; margin:0 auto !important; border:1px solid rgba(255,255,255,.34) !important; border-radius:28px !important; padding:28px 28px 23px !important; background:linear-gradient(145deg,rgba(16,40,57,.52),rgba(255,255,255,.13)) !important; box-shadow:0 28px 70px rgba(4,18,30,.30), inset 0 1px 0 rgba(255,255,255,.30) !important; backdrop-filter:blur(22px) saturate(135%) !important; -webkit-backdrop-filter:blur(22px) saturate(135%) !important; }}
+          [data-testid="stForm"] {{ width:100% !important; max-width:410px !important; margin:0 auto !important; border:1px solid rgba(255,255,255,.34) !important; border-radius:28px !important; padding:28px 28px 23px !important; background:linear-gradient(145deg,rgba(255,255,255,.94),rgba(239,248,255,.84)) !important; box-shadow:0 28px 70px rgba(4,18,30,.30), inset 0 1px 0 rgba(255,255,255,.30) !important; backdrop-filter:blur(22px) saturate(135%) !important; -webkit-backdrop-filter:blur(22px) saturate(135%) !important; }}
           .login-card-title {{ margin-bottom:16px !important; }}
-          .login-card-title .eyebrow {{ font-size:10px !important; color:rgba(244,249,253,.76) !important; letter-spacing:.11em !important; }}
-          .login-card-title h1 {{ font-size:27px !important; line-height:1.15 !important; color:#FFFFFF !important; margin:7px 0 3px !important; font-weight:650 !important; letter-spacing:-.02em !important; }}
-          .login-card-title strong {{ font-size:14px !important; color:#BDE7FF !important; }}
-          .login-card-title p {{ max-width:315px !important; margin:9px auto 0 !important; font-size:11px !important; line-height:1.5 !important; color:rgba(244,249,253,.82) !important; }}
+          .login-card-title .eyebrow {{ font-size:10px !important; color:#52677A !important; letter-spacing:.11em !important; }}
+          .login-card-title h1 {{ font-size:27px !important; line-height:1.15 !important; color:#173b56 !important; margin:7px 0 3px !important; font-weight:650 !important; letter-spacing:-.02em !important; }}
+          .login-card-title strong {{ font-size:14px !important; color:#0066B3 !important; }}
+          .login-card-title p {{ max-width:315px !important; margin:9px auto 0 !important; font-size:11px !important; line-height:1.5 !important; color:#52677A !important; }}
           [data-testid="stForm"] label p {{ font-size:11.5px !important; font-weight:650 !important; color:#111111 !important; text-shadow:none !important; }}
           [data-testid="stForm"] input {{ min-height:46px !important; border:1px solid rgba(255,255,255,.42) !important; border-radius:13px !important; font-size:13px !important; color:#111111 !important; -webkit-text-fill-color:#111111 !important; caret-color:#111111 !important; background:rgba(255,255,255,.56) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.34) !important; }}
           [data-testid="stForm"] input::placeholder {{ color:rgba(17,17,17,.62) !important; opacity:1 !important; }}
           [data-testid="stFormSubmitButton"] button {{ min-height:46px !important; border-radius:999px !important; background:linear-gradient(135deg,rgba(0,102,179,.92),rgba(29,147,214,.86)) !important; border:1px solid rgba(255,255,255,.30) !important; color:#FFFFFF !important; font-size:12px !important; font-weight:680 !important; box-shadow:0 12px 26px rgba(0,58,100,.24), inset 0 1px 0 rgba(255,255,255,.20) !important; }}
-          .login-corporate-note {{ margin-top:14px !important; padding-top:12px !important; border-top:1px solid rgba(255,255,255,.20) !important; font-size:9.5px !important; color:rgba(244,249,253,.68) !important; }}
+          .login-corporate-note {{ margin-top:14px !important; padding-top:12px !important; border-top:1px solid rgba(255,255,255,.20) !important; font-size:9.5px !important; color:#52677A !important; }}
           @media (max-width:820px) {{
             .login-side-copy,.login-footer-copy {{display:none !important;}}
             .login-logos {{left:10px !important; right:10px !important; top:3vh !important;
@@ -7499,13 +7298,12 @@ def _logout(user: dict) -> None:
 
 
 def _render_app() -> None:
+    st.session_state["theme_mode"] = "light"
     _inject_logged_in_css()
-    _inject_theme_css()
     _inject_usability_css()
     _inject_enterprise_css()
     _inject_responsive_css()
     _inject_glass_theme_css()
-    _inject_liquid_glass_v2_css()
     _inject_sidebar_visibility_fix_css()
     user = _current_user()
     # Existing sessions and cookies may store older role labels. The account
@@ -7574,9 +7372,7 @@ def _render_app() -> None:
     except Exception:
         notification_count = 0
 
-    # Always render the sidebar. Streamlit's native collapse/expand control is used
-    # so the menu cannot become an empty reserved panel because of stale session state.
-    st.session_state['sidebar_hidden'] = False
+    # Always mount navigation; the single session-state controller owns visibility.
     new_page = render_sidebar(user, current_page, notification_count)
 
     if new_page != current_page:
@@ -7621,10 +7417,7 @@ def _render_app() -> None:
 
 
 _init_session()
-# Do not restore authentication from the legacy browser cookie. A stale cookie
-# can re-authenticate the user immediately after logout because browser cookie
-# deletion is asynchronous. Streamlit session_state already persists across normal
-# reruns, so a cookie is unnecessary for ordinary navigation and UI updates.
+_restore_login_cookie()
 _inject_base_css()
 _verify_request = _query_param_value("verify")
 _verify_version = _query_param_value("v")
