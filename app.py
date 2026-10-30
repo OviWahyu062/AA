@@ -703,27 +703,90 @@ def is_approver(role: str) -> bool:
     return normalize_role(role) in APPROVER_ROLES
 
 
-def apply_request_scope(df: pd.DataFrame, role: str, username: str = "", area: str = "") -> pd.DataFrame:
-    """Apply request visibility rules consistently across dashboard and documents.
+def _area_key(value: Any) -> str:
+    """Normalize whitespace/case only; never infer an area from a partial match."""
+    return " ".join(str(value or "").strip().casefold().split())
 
-    Site Pengaju sees only its own submissions. PIC Area (L1) remains scoped to
-    its assigned area. Manager Area (L4) follows the same organizational scope as
-    the L4 workqueue so approved/pending items cannot disappear from Dashboard
-    or Dokumen Approval because of an incomplete/mismatched Area value in the
-    account profile. L2/L3 are organizational roles as in the approval queue.
-    """
+
+def _trusted_area_user(user: dict[str, Any], fresh: bool = False) -> dict[str, str]:
+    """Read server-side account mapping; do not trust area/role from session or URL."""
+    role = normalize_role(str(user.get("role", "")))
+    if role not in {ROLE_L1, ROLE_L4}:
+        return dict(user)
+    username = str(user.get("username", "")).strip()
+    account = get_user(username, fresh=fresh)
+    if not account or normalize_role(account.get("role", "")) != role:
+        raise PermissionError("Identitas akun approval tidak valid. Silakan login kembali.")
+    if not _area_key(account.get("area", "")):
+        raise PermissionError("Area akun PIC/Manager belum dikonfigurasi di Data Username + Password.")
+    return account
+
+
+def _site_area_lookup() -> dict[str, str]:
+    """Resolve Site Pengaju using existing Master Area Site mapping, if present."""
+    if not worksheet_exists(SHEET_AREA_SITE):
+        return {}
+    result: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for raw in read_records(SHEET_AREA_SITE):
+        row = {normalize_header(k): v for k, v in raw.items()}
+        if str(row.get("active", "")).strip().casefold() in {"false", "0", "no", "nonaktif", "inactive"}:
+            continue
+        area = _area_key(row.get("area", ""))
+        if not area:
+            continue
+        for key in ("site_code", "site_name"):
+            site = _area_key(row.get(key, ""))
+            if site:
+                # Ambiguous mapping must not grant access to either area.
+                if site in result and result[site] != area:
+                    ambiguous.add(site)
+                elif site not in ambiguous:
+                    result[site] = area
+    for site in ambiguous:
+        result[site] = ""
+    return result
+
+
+def _request_area_key(row: dict[str, Any], site_mapping: dict[str, str]) -> str:
+    explicit = _area_key(row.get("area", ""))
+    site_code = _area_key(row.get("site_code", ""))
+    site = _area_key(row.get("site", ""))
+    site_prefix = _area_key(str(row.get("site", "")).split(" - ", 1)[0])
+    mapped = [site_mapping[k] for k in (site_code, site, site_prefix) if k in site_mapping and site_mapping[k]]
+    # A contradictory Site mapping and explicit Area must not be disclosed.
+    if mapped and (len(set(mapped)) != 1 or (explicit and explicit != mapped[0])):
+        return ""
+    return explicit or (mapped[0] if mapped else "")
+
+
+def apply_request_scope(df: pd.DataFrame, role: str, username: str = "", area: str = "") -> pd.DataFrame:
+    """Backend row filter for dashboard, documents, workqueue and item details."""
     if df.empty:
         return df
     role = normalize_role(role)
     scoped = df.copy()
     if role == ROLE_USER and "username" in scoped.columns:
-        scoped = scoped[scoped["username"].astype(str).str.casefold() == str(username).casefold()]
-    elif role == ROLE_L1 and area and "area" in scoped.columns:
-        target_area = str(area).strip().casefold()
-        scoped = scoped[scoped["area"].astype(str).str.strip().str.casefold() == target_area]
-    # L2/L3/L4 intentionally keep organizational visibility. This matches the
-    # role-based approval workqueue and prevents L4 dashboard/document mismatch.
+        return scoped[scoped["username"].astype(str).str.casefold() == str(username).casefold()].copy()
+    if role in {ROLE_L1, ROLE_L4}:
+        # The caller must use the account area read from the server-side user sheet.
+        target = _area_key(area)
+        if not target:
+            return scoped.iloc[0:0].copy()
+        mapping = _site_area_lookup()
+        allowed = scoped.apply(lambda r: _request_area_key(r.to_dict(), mapping) == target, axis=1)
+        return scoped[allowed].copy()
     return scoped
+
+
+def _assert_area_access(user: dict[str, Any], item: dict[str, Any]) -> None:
+    role = normalize_role(str(user.get("role", "")))
+    if role not in {ROLE_L1, ROLE_L4}:
+        return
+    account = _trusted_area_user(user, fresh=True)
+    item_area = _request_area_key(item, _site_area_lookup())
+    if not item_area or item_area != _area_key(account.get("area", "")):
+        raise PermissionError("Akses ditolak: item berada di luar area akun Anda.")
 
 
 # ============================== utils/schemas.py ==============================
@@ -794,6 +857,10 @@ REQUEST_HEADERS = [
     "last_recommended_level",
     "last_recommended_by",
     "last_action_level",
+    "Kode Material SAP",
+    "PIC Input SAP",
+    "Waktu Input Kode SAP",
+    "Status Input SAP",
 ]
 
 APPROVAL_HEADERS = [
@@ -1378,6 +1445,7 @@ def update_row_by_keys(
     sheet_name: str,
     key_values: dict[str, Any],
     updates: dict[str, Any],
+    value_input_option: str = "USER_ENTERED",
 ) -> int:
     """Update rows matching all key/value pairs.
 
@@ -1418,7 +1486,7 @@ def update_row_by_keys(
     if not batch:
         return 0
     try:
-        _google_retry(lambda: ws.batch_update(batch, value_input_option="USER_ENTERED"))
+        _google_retry(lambda: ws.batch_update(batch, value_input_option=value_input_option))
         clear_data_cache(sheet_name)
         return matched
     except Exception as exc:
@@ -1725,6 +1793,10 @@ REQUEST_COLUMNS = [
     "last_recommended_level",
     "last_recommended_by",
     "last_action_level",
+    "kode_material_sap",
+    "pic input sap",
+    "waktu input kode sap",
+    "status input sap",
 ]
 
 
@@ -1824,8 +1896,9 @@ class RequestService:
                         _description_part(row.get("material_description_final")) or current)
         return df
 
-    def get_request_headers_df(self, fresh: bool = False) -> pd.DataFrame:
-        items = self.get_items_df(fresh=fresh)
+    def get_request_headers_df(self, fresh: bool = False, items: pd.DataFrame | None = None) -> pd.DataFrame:
+        if items is None:
+            items = self.get_items_df(fresh=fresh)
         if items.empty:
             return items.copy()
         headers = []
@@ -1858,14 +1931,13 @@ class RequestService:
         return df.reset_index(drop=True)
 
     def get_scoped_headers(self, user: dict[str, Any], fresh: bool = False) -> pd.DataFrame:
-        return apply_request_scope(
-            self.get_request_headers_df(fresh=fresh),
-            role=str(user.get("role", "")),
-            username=str(user.get("username", "")),
-            area=str(user.get("area", "")),
-        ).reset_index(drop=True)
+        # Aggregate only after item-level authorization to avoid cross-area leaks
+        # from legacy multi-area requests.
+        items = self.get_scoped_items(user, fresh=fresh)
+        return self.get_request_headers_df(items=items).reset_index(drop=True)
 
     def get_scoped_items(self, user: dict[str, Any], fresh: bool = False) -> pd.DataFrame:
+        user = _trusted_area_user(user)
         return apply_request_scope(
             self.get_items_df(fresh=fresh),
             role=str(user.get("role", "")),
@@ -1897,6 +1969,14 @@ class RequestService:
         header["rejected_item_count"] = int((match["status"].astype(str) == STATUS_REJECTED).sum())
         header["pending_item_count"] = int(match["status"].astype(str).str.startswith("PENDING_").sum())
         return RequestDetail(header=header, items=match.reset_index(drop=True))
+
+    def get_scoped_request(self, request_id: str, user: dict[str, Any], fresh: bool = False) -> RequestDetail | None:
+        items = self.get_scoped_items(user, fresh=fresh)
+        scoped = items[items["request_id"].astype(str) == str(request_id)].copy()
+        if scoped.empty:
+            return None
+        header = self.get_request_headers_df(items=scoped).iloc[0].to_dict()
+        return RequestDetail(header=header, items=scoped.reset_index(drop=True))
 
     def _fallback_next_id(self, year: int) -> str:
         df = self.get_request_headers_df(fresh=True)
@@ -1973,6 +2053,7 @@ class RequestService:
             "rejected_by": "",
             "rejection_note": "",
             "last_action_level": "SUBMITTED",
+            "Status Input SAP": "Belum Diinput",
         }
         rows = []
         for idx, item in enumerate(items, start=1):
@@ -2209,10 +2290,7 @@ class RequestService:
     def notification_count(self, user: dict[str, Any]) -> int:
         role = normalize_role(str(user.get("role", "")))
         if role in APPROVER_ROLES:
-            # Approval roles work from the organizational queue. Do not hide a
-            # valid pending item merely because the account profile area differs
-            # from the request area during testing/rotation of approver accounts.
-            items = self.get_items_df()
+            items = self.get_scoped_items(user)
             if items.empty:
                 return 0
             expected = ROLE_EXPECTED_STATUS[role]
@@ -2261,7 +2339,7 @@ class ApprovalService:
         # so forcing a fresh Google Sheets read here would quickly exhaust quota.
         # Writes invalidate Data Permohonan immediately, and users can also use
         # the Refresh Data button on the workqueue.
-        items = self.requests.get_items_df()
+        items = self.requests.get_scoped_items(user)
         if items.empty:
             return items
         items = items.copy()
@@ -2291,12 +2369,12 @@ class ApprovalService:
         if not expected or not level:
             return {"total_in": 0, "waiting": 0, "approved": 0, "rejected": 0}
 
-        items = self.requests.get_items_df()
+        items = self.requests.get_scoped_items(user)
         if items.empty:
             return {"total_in": 0, "waiting": 0, "approved": 0, "rejected": 0}
         items = items.copy()
         items["status"] = items["status"].map(canonical_status)
-        allowed_request_ids = set(items["request_id"].astype(str).tolist())
+        allowed_keys = {self._item_key(r.get("request_id"), r.get("item_no")) for _, r in items.iterrows()}
         waiting = items[items["status"] == expected]
         waiting_keys = {self._item_key(r.get("request_id"), r.get("item_no")) for _, r in waiting.iterrows()}
 
@@ -2305,10 +2383,11 @@ class ApprovalService:
             return {"total_in": len(waiting_keys), "waiting": len(waiting_keys), "approved": 0, "rejected": 0}
 
         role_hist = history_all[history_all["level"].astype(str).str.upper() == level.upper()].copy()
-        if allowed_request_ids and "request_id" in role_hist.columns:
-            role_hist = role_hist[role_hist["request_id"].astype(str).isin(allowed_request_ids)]
         if "item_no" not in role_hist.columns:
             role_hist["item_no"] = ""
+        role_hist = role_hist[role_hist.apply(
+            lambda r: self._item_key(r.get("request_id"), r.get("item_no")) in allowed_keys, axis=1
+        )].copy()
 
         approved_keys: set[str] = set()
         rejected_keys: set[str] = set()
@@ -2357,15 +2436,44 @@ class ApprovalService:
         item = self.requests.get_item(request_id, resolved_item_no, fresh=True)
         if not item:
             raise SheetsServiceError("Item material tidak ditemukan.")
+        _assert_area_access(user, item)
         current = canonical_status(item.get("status", ""))
         if current != expected:
             raise ValueError(
                 f"Item #{resolved_item_no} tidak lagi berada pada antrean {expected.replace('_', ' ').title()}. Muat ulang data sebelum melanjutkan."
             )
-        # Authorization remains role/level based. The approval queue itself is
-        # organizational so a valid L1/L2 item cannot disappear solely because
-        # an approver account has a different or incomplete area profile.
         return item, role, expected, resolved_item_no
+
+    def save_sap_code(self, request_id: str, item_no: Any, user: dict[str, Any], code: str) -> None:
+        """Persist a draft SAP code for exactly one L3 item, with audit provenance."""
+        item, role, _, resolved_no = self._authorize_item_action(request_id, item_no, user)
+        if role != ROLE_L3:
+            raise PermissionError("Hanya PIC Persediaan (L3) dapat mengisi Kode Material SAP.")
+        code = str(code or "").strip()
+        if not code:
+            raise ValueError("Kode Material SAP harus dilengkapi.")
+        if len(code) > 80 or any(ch in code for ch in "\r\n\t") or code[0] in "=+@":
+            raise ValueError("Kode Material SAP tidak valid (maksimal 80 karakter, tanpa baris baru atau awalan formula).")
+        # Preserve the original timestamp if no change was made.
+        old_code = str(item.get("kode_material_sap", "") or "").strip()
+        if old_code == code:
+            return
+        ensure_sheet_columns(SHEET_REQUESTS, REQUEST_HEADERS)
+        changed = update_row_by_keys(
+            SHEET_REQUESTS,
+            {"request_id": request_id, "item_no": resolved_no},
+            {
+                "Kode Material SAP": code,
+                "PIC Input SAP": str(user.get("username", "")),
+                "Waktu Input Kode SAP": iso_now(),
+                "Status Input SAP": "Belum Diinput",
+            },
+            value_input_option="RAW",  # Preserve leading zeros and long SAP identifiers.
+        )
+        if changed != 1:
+            raise SheetsServiceError("Penyimpanan kode SAP harus tepat satu item. Periksa ID Request dan Nomor Item.")
+        log_event(str(user.get("username", "")), role, "SAVE_SAP_CODE", request_id,
+                  f"Item #{resolved_no}: kode SAP dicatat oleh PIC Persediaan.")
 
     def approve(
         self,
@@ -2374,8 +2482,13 @@ class ApprovalService:
         note: str = "",
         item_no: Any | None = None,
         recommended_material_name: str = "",
+        sap_material_code: str = "",
     ) -> str:
         item, role, current_status, resolved_item_no = self._authorize_item_action(request_id, item_no, user)
+        if role == ROLE_L3:
+            code = str(sap_material_code or item.get("kode_material_sap", "") or "").strip()
+            if not code:
+                raise ValueError("Kode Material SAP harus dilengkapi sebelum Setujui & lanjutkan.")
         next_status = NEXT_STATUS[current_status]
         timestamp = iso_now()
         current_description = latest_material_description(item)
@@ -2408,6 +2521,8 @@ class ApprovalService:
                         "yang belum memenuhi standar. " + " ".join(problems)
                     )
 
+        if role == ROLE_L3:
+            self.save_sap_code(request_id, resolved_item_no, user, code)
         if not worksheet_exists(SHEET_APPROVALS):
             raise SheetsServiceError(f'Worksheet "{SHEET_APPROVALS}" belum tersedia.')
         ensure_sheet_columns(SHEET_APPROVALS, APPROVAL_HEADERS)
@@ -4329,6 +4444,11 @@ def render_request_detail(detail, history: pd.DataFrame, *, show_title: bool = T
     }.get(c, c) for c in item_df.columns]
     render_readonly_table(item_df, "Belum ada item material.")
 
+    if "kode_material_sap" in items.columns and items["kode_material_sap"].fillna("").astype(str).str.strip().any():
+        section_heading("Tracking Kode Material SAP")
+        sap_view = items[["item_no", "kode_material_sap", "pic_input_sap", "waktu_input_kode_sap", "status_input_sap"]].copy()
+        sap_view.columns = ["No Item", "Kode Material SAP", "PIC Persediaan", "Waktu Input", "Status Input SAP"]
+        render_readonly_table(sap_view, "Belum ada kode SAP.")
     section_heading("Deskripsi Material dan Riwayat Koreksi", "Original tetap tersimpan; rekomendasi yang disetujui terakhir menjadi acuan dan ditetapkan final oleh L4")
     for _, item in items.iterrows():
         no = _description_part(item.get("item_no"))
@@ -4437,8 +4557,8 @@ def render_dashboard_page(user: dict, request_service: RequestService, approval_
         st.session_state['dashboard_selected_request'] = selected_activity
     selected = st.session_state.get('dashboard_selected_request', '')
     if selected:
-        detail = request_service.get_request(selected)
-        if detail:
+        detail = request_service.get_scoped_request(selected, user)
+        if detail and selected in set(request_service.get_scoped_headers(user)["request_id"].astype(str)):
             with st.container(border=True):
                 section_heading(f'Detail permohonan {selected}')
                 render_request_detail(detail, approval_service.get_history(selected))
@@ -5106,7 +5226,7 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
         st.session_state["request_form_selected"] = selected
     selected = st.session_state.get("request_form_selected", "")
     if selected:
-        detail = request_service.get_request(selected)
+        detail = request_service.get_scoped_request(selected, user)
         if detail:
             st.markdown('<div class="bima-vgap-16"></div>', unsafe_allow_html=True)
             with st.container(border=True):
@@ -5313,6 +5433,13 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
     if not selected_request or str(selected_item_no).strip() == "":
         return
 
+    # Session state can be changed independently of the displayed queue.
+    allowed_keys = {(str(r.get("request_id")), str(r.get("item_no"))) for _, r in queue.iterrows()}
+    if (str(selected_request), str(selected_item_no)) not in allowed_keys:
+        st.warning("Item tidak tersedia dalam antrean approval akun Anda.")
+        st.session_state.pop("approval_selected_request", None)
+        st.session_state.pop("approval_selected_item_no", None)
+        return
     item_row = request_service.get_item(selected_request, selected_item_no)
     if not item_row:
         st.warning("Item material yang dipilih tidak ditemukan.")
@@ -5333,6 +5460,7 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
     if st.button('Tutup panel review', key=f'ux_close_review_{selected_request}_{selected_item_no}'):
         st.session_state.pop('approval_selected_request', None)
         st.session_state.pop('approval_selected_item_no', None)
+        st.session_state.pop('sap_active_item', None)
         st.rerun()
 
     left, right = st.columns([1.55, 1], gap="medium")
@@ -5366,6 +5494,29 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
                 st.warning("Deskripsi saat ini belum memenuhi standar: " + " ".join(current_problems))
             else:
                 st.success(f"Deskripsi saat ini sesuai format dan batas {DESCRIPTION_MAX_LENGTH} karakter.")
+            sap_code = ""
+            if role == ROLE_L3:
+                sap_key = f"approval_sap_code_{selected_request}_{selected_item_no}"
+                saved_code = str(item_row.get("kode_material_sap", "") or "").strip()
+                active_sap_item = (str(selected_request), str(selected_item_no))
+                if st.session_state.get("sap_active_item") != active_sap_item:
+                    st.session_state[sap_key] = saved_code
+                    st.session_state["sap_active_item"] = active_sap_item
+                sap_code = st.text_input(
+                    "Kode Material SAP",
+                    key=sap_key,
+                    placeholder="Masukkan kode material SAP",
+                    max_chars=80,
+                )
+                if st.button("Simpan Kode Material SAP", key=f"save_sap_{selected_request}_{selected_item_no}",
+                             use_container_width=True):
+                    try:
+                        approval_service.save_sap_code(selected_request, selected_item_no, user, sap_code)
+                        st.success("Kode Material SAP tersimpan permanen ke Google Sheets.")
+                    except (SheetsServiceError, ValueError, PermissionError) as exc:
+                        st.error(str(exc))
+                if not sap_code.strip():
+                    st.warning("Kode Material SAP harus dilengkapi sebelum Setujui & lanjutkan.")
             if role in {ROLE_L1, ROLE_L3}:
                 recommendation = st.text_input(
                     "Rekomendasi Deskripsi Material" + (" *" if needs_recommendation else " (opsional)"),
@@ -5445,6 +5596,7 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
                         note,
                         item_no=selected_item_no,
                         recommended_material_name=recommendation,
+                        sap_material_code=sap_code,
                     )
                     st.session_state["approval_flash"] = (
                         f"{selected_request} Item #{selected_item_no} berhasil disetujui. "
@@ -5467,6 +5619,7 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
             clear_data_cache(SHEET_DOCUMENTS)
             st.session_state.pop("approval_selected_request", None)
             st.session_state.pop("approval_selected_item_no", None)
+            st.session_state.pop("sap_active_item", None)
             st.rerun()
         except (SheetsServiceError, ValueError, PermissionError) as exc:
             st.error(str(exc))
@@ -5555,7 +5708,7 @@ def render_request_history_page(user: dict, request_service: RequestService, app
         st.session_state["history_selected_request"] = selected
     selected = st.session_state.get("history_selected_request", "")
     if selected:
-        detail = request_service.get_request(selected)
+        detail = request_service.get_scoped_request(selected, user)
         if detail:
             st.markdown('<div class="bima-vgap-16"></div>', unsafe_allow_html=True)
             with st.container(border=True):
@@ -5710,9 +5863,13 @@ def render_documents_page(user: dict, request_service: RequestService, approval_
     request_id = selected_entry["request_id"]
     item_no = selected_entry["item_no"] or None
     detail = request_service.get_request(request_id)
-    if not detail or detail.items.empty:
-        st.error("Request atau rincian item tidak ditemukan. Perbarui daftar dokumen.")
+    scoped_items = request_service.get_scoped_items(user)
+    allowed = scoped_items[scoped_items["request_id"].astype(str) == str(request_id)]
+    if not detail or detail.items.empty or allowed.empty:
+        st.error("Request atau rincian item tidak tersedia untuk akun ini.")
         return
+    # Avoid leaking another area's items if a legacy request spans several areas.
+    detail.items = allowed.reset_index(drop=True)
     current_status = detail.items["status"].map(canonical_status)
     closed = {STATUS_APPROVED_FINAL, STATUS_REJECTED}
     if item_no is not None:
@@ -5944,6 +6101,18 @@ st.set_page_config(
 
 cookie_manager = stx.CookieManager()
 
+def _session_signing_key() -> bytes:
+    """Prefer dedicated secret, fallback to existing server-only service account key."""
+    key = str(st.secrets.get("cookie_signing_key", "") or "").strip()
+    if not key:
+        key = str(st.secrets["gcp_service_account"]["private_key"])
+    return hmac.new(key.encode("utf-8"), b"master-material-cookie-v1", "sha256").digest()
+
+
+def _cookie_signature(data: dict[str, Any]) -> str:
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hmac.new(_session_signing_key(), payload.encode("utf-8"), "sha256").hexdigest()
+
 def _save_login_cookie() -> None:
     payload = {
         "authenticated": True,
@@ -5957,6 +6126,7 @@ def _save_login_cookie() -> None:
         "no_hp": st.session_state.get("no_hp", ""),
         "nomor_pegawai": st.session_state.get("nomor_pegawai", ""),
     }
+    payload["signature"] = _cookie_signature(payload)
     cookie_manager.set(
         "pt_bima_session",
         json.dumps(payload),
@@ -5977,8 +6147,19 @@ def _restore_login_cookie() -> None:
         return
     try:
         data = json.loads(raw)
-        for k, v in data.items():
-            st.session_state[k] = v
+        signature = str(data.pop("signature", ""))
+        if not signature or not hmac.compare_digest(signature, _cookie_signature(data)):
+            raise PermissionError("Cookie login tidak valid.")
+        if not data.get("authenticated") or not str(data.get("username", "")).strip():
+            raise PermissionError("Cookie login tidak lengkap.")
+        # Restore server-side account attributes, never browser-provided area/role.
+        account = get_user(str(data["username"]), fresh=True)
+        if not account or account.get("status_akun", "").strip().lower() in {
+            "inactive", "nonaktif", "0", "false", "disabled"
+        }:
+            raise PermissionError("Akun tidak aktif atau tidak ditemukan.")
+        for k in ("username", "nama", "role", "jabatan", "area", "site", "email", "no_hp", "nomor_pegawai"):
+            st.session_state[k] = str(account.get(k, ""))
         st.session_state["authenticated"] = True
         st.session_state["logged_in"] = True
     except Exception:
@@ -7292,6 +7473,9 @@ def _set_authenticated_user(user: dict) -> None:
     for key in ["username", "nama", "role", "jabatan", "area", "site", "email", "no_hp", "nomor_pegawai"]:
         st.session_state[key] = str(user.get(key, ""))
     st.session_state["current_page"] = PAGE_DASHBOARD
+    # Signed cookie preserves login after a browser refresh; area and role are
+    # still reloaded from the server when the cookie is restored.
+    _save_login_cookie()
 
 
 def _current_user() -> dict:
