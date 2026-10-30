@@ -972,7 +972,7 @@ def valid_url(value: str) -> bool:
     return bool(URL_PATTERN.match(str(value or "").strip()))
 
 
-def validate_request_payload(payload: dict, items: list[dict]) -> list[str]:
+def validate_request_payload(payload: dict, items: list[dict], image_uploaded: bool = False) -> list[str]:
     errors: list[str] = []
     for field, label in {
         "nama_pemohon": "Nama Pemohon",
@@ -983,13 +983,12 @@ def validate_request_payload(payload: dict, items: list[dict]) -> list[str]:
         "profit_center": "Profit Center",
         "storage_location": "Storage Location",
         "valuation_class": "Valuation Class",
-        "document_url": "URL Dokumen / Link Manual",
     }.items():
         if not required(payload.get(field)):
             errors.append(f"{label} wajib diisi.")
 
-    if required(payload.get("document_url")) and not valid_url(str(payload["document_url"])):
-        errors.append("URL Dokumen / Link Manual harus diawali http:// atau https://.")
+    if not image_uploaded:
+        errors.append("Lampiran dokumentasi wajib berupa gambar. Silakan upload gambar terlebih dahulu.")
 
     if not items:
         errors.append("Minimal satu item material harus ditambahkan.")
@@ -2021,6 +2020,9 @@ class RequestService:
         user: dict[str, Any],
         image_url: str = "",
     ) -> str:
+        # Server-side validation: no request may be created without an uploaded image link.
+        if not image_url or not valid_url(image_url):
+            raise SheetsServiceError("Lampiran gambar wajib diupload sebelum permintaan dibuat.")
         if not worksheet_exists(SHEET_REQUESTS):
             raise SheetsServiceError(
                 f'Worksheet "{SHEET_REQUESTS}" belum tersedia. Jalankan bootstrap schema terlebih dahulu.'
@@ -4450,7 +4452,7 @@ def render_request_detail(detail, history: pd.DataFrame, *, show_title: bool = T
             ("Progres", request_progress_summary(items)),
         ])
         if str(h.get("document_url", "")).startswith("http"):
-            st.link_button("Buka Dokumen / Manual", str(h.get("document_url")), use_container_width=True)
+            st.link_button("Buka Dokumen Lama", str(h.get("document_url")), use_container_width=True)
         if str(h.get("image_url", "")).startswith("http"):
             st.link_button("Buka Lampiran Gambar", str(h.get("image_url")), use_container_width=True)
 
@@ -5170,15 +5172,18 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
         description = items[0]["material_name"].strip() if items else ""
 
         st.markdown('<div class="bima-form-divider"></div>', unsafe_allow_html=True)
-        _panel_head(4, "Lampiran Dokumentasi", "URL dokumen wajib diisi. Upload gambar bersifat opsional.")
-        d1, d2 = st.columns([1.7, 1], gap="medium")
-        with d1:
-            document_url = st.text_input("URL Dokumen / Link Manual *", key="req_document_url", placeholder="https://...")
-            st.caption("Lampiran TKDN tidak digunakan sesuai revisi dokumen acuan.")
-        with d2:
-            image_file = st.file_uploader("Upload Gambar (opsional)", type=["png", "jpg", "jpeg", "webp"], key="req_image_upload")
-            if image_file and not drive_configured():
-                st.warning("Google Drive belum dikonfigurasi. File hanya dapat disubmit setelah drive_folder_id ditambahkan atau file upload dihapus.")
+        _panel_head(4, "Lampiran Dokumentasi", "Upload gambar wajib. Tautan gambar akan tersimpan otomatis ke Google Sheets.")
+        image_file = st.file_uploader(
+            "Upload Gambar Dokumentasi *",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="req_image_upload",
+            help="Format: PNG, JPG, JPEG, atau WEBP. Gambar wajib diunggah sebelum mengirim permintaan.",
+        )
+        st.caption("Lampiran TKDN tidak digunakan sesuai revisi dokumen acuan. Link gambar dibuat otomatis setelah upload.")
+        if image_file is not None:
+            st.image(image_file, caption=f"Pratinjau: {image_file.name}", width=320)
+        if not drive_configured():
+            st.warning("Penyimpanan gambar membutuhkan konfigurasi drive_folder_id di Streamlit Secrets. Hubungi admin sebelum mengirim permintaan.")
 
         payload = {
             "nama_pemohon": nama_pemohon,
@@ -5190,7 +5195,6 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
             "profit_center": profit_center or "",
             "storage_location": storage_location or "",
             "valuation_class": valuation_class or "",
-            "document_url": document_url.strip(),
         }
 
         if "is_submitting_request" not in st.session_state:
@@ -5207,9 +5211,9 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
             submit_clicked = st.button("Kirim Permintaan Master Material", key="submit_request", type="primary", use_container_width=True, disabled=st.session_state["is_submitting_request"])
 
     if submit_clicked:
-        errors = validate_request_payload(payload, items)
-        if image_file and not drive_configured():
-            errors.append("Upload gambar belum dapat disimpan karena Google Drive belum dikonfigurasi.")
+        errors = validate_request_payload(payload, items, image_uploaded=image_file is not None)
+        if not drive_configured():
+            errors.append("Upload gambar belum dapat disimpan karena drive_folder_id di Streamlit Secrets belum dikonfigurasi.")
         if errors:
             for error in errors:
                 st.error(error)
@@ -5217,9 +5221,14 @@ def render_request_form_page(user: dict, request_service: RequestService, approv
             st.session_state["is_submitting_request"] = True
             try:
                 with st.spinner("Menyimpan permintaan dan memperbarui workflow approval..."):
-                    image_url = ""
-                    if image_file:
-                        image_url = upload_file(image_file.getvalue(), image_file.name, image_file.type or "application/octet-stream")
+                    # The file uploader is required and validated before this branch.
+                    # Save the generated Google Drive URL in Data Permohonan.image_url.
+                    image_url = upload_file(
+                        image_file.getvalue(), image_file.name,
+                        image_file.type or "application/octet-stream",
+                    )
+                    if not image_url or not valid_url(image_url):
+                        raise DriveStorageError("Upload gambar tidak menghasilkan link yang valid. Permintaan belum disimpan.")
                     request_id = request_service.create_request(payload, items, user, image_url=image_url)
                 st.session_state["last_success_text"] = f"Permintaan {request_id} berhasil dikirim. Status awal: Pending L1."
                 st.session_state["request_success_message"] = True
@@ -5489,9 +5498,13 @@ def render_approval_page(user: dict, request_service: RequestService, approval_s
             st.markdown('<span class="bima-detail-panel-marker"></span>', unsafe_allow_html=True)
             section_heading(f"Informasi Review {level}", "Informasi ditampilkan sesuai kebutuhan approval pada level aktif.")
             render_approval_review_information(role, item_row, history)
-            if str(item_row.get("document_url", "")).startswith("http"):
+            if str(item_row.get("image_url", "")).startswith("http"):
                 st.write("")
-                st.link_button("Buka Dokumen / Manual", str(item_row.get("document_url")), use_container_width=True)
+                st.link_button("Buka Lampiran Gambar", str(item_row.get("image_url")), use_container_width=True)
+            elif str(item_row.get("document_url", "")).startswith("http"):
+                # Historical requests may still use a manually supplied document URL.
+                st.write("")
+                st.link_button("Buka Dokumen Lama", str(item_row.get("document_url")), use_container_width=True)
 
     with right:
         with st.container(border=True):
