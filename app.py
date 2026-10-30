@@ -1637,6 +1637,9 @@ USER_ALIASES = {
 
 def _canonical_user(record: dict[str, Any]) -> dict[str, str]:
     user = {key: str(first_nonempty(record, aliases, "")).strip() for key, aliases in USER_ALIASES.items()}
+    # Keep the exact Role cell for UI labels, separately from the normalized
+    # authorization role used by the L1-L4 workflow.
+    user["role_label"] = user["role"]
     # IMPORTANT: explicit approval level is authoritative. Do not replace an
     # L4 approval assignment with L3 merely because the legacy job-title field
     # says "Manager Persediaan". The jabatan field is informational only.
@@ -3913,11 +3916,28 @@ def _nav_button(label: str, icon_name: str, key: str, active: bool) -> bool:
         return st.button(label, **kwargs)
 
 
+def sidebar_role_from_sheet(user: dict) -> str:
+    """Display the literal Role column from Data Username + Password.
+
+    Never use this display string to grant access: normalized user['role']
+    remains the only workflow role. Cached reads avoid per-rerun API calls.
+    """
+    fallback = role_title(user.get('role'), user.get('site'))
+    username = str(user.get('username') or '').strip()
+    if not username:
+        return fallback
+    try:
+        sheet_user = get_user(username, fresh=False)
+    except SheetsServiceError:
+        return fallback  # Temporary Sheets read failure must not break navigation.
+    return str((sheet_user or {}).get('role_label') or '').strip() or fallback
+
+
 def render_sidebar(user: dict, current_page: str, notification_count: int = 0) -> str:
     """Account identity, actionable notifications, menu, and logout in sidebar."""
     with st.sidebar:
         display_name = str(user.get('nama') or user.get('username') or 'Pengguna')
-        role_name = role_title(user.get('role'), user.get('site'))
+        role_name = sidebar_role_from_sheet(user)
         count = max(0, int(notification_count or 0))
         role = normalize_role(str(user.get('role', '')))
         approver = role in APPROVER_ROLES
